@@ -74,13 +74,13 @@ class GeneratorResNet(nn.Module): # 이미지 사진 [channel, width ,height]
                                    )
 
         # DownSampling
-        self.downsample1 = downSample_Generator(in_channels=64,
+        self.downsample1 = DownSample_Generator(in_channels=64,
                                                 out_channels=128,
                                                 kernel_size=3,
                                                 stride=2,
                                                 padding=1)
 
-        self.downsample2 = downSample_Generator(in_channels=128,
+        self.downsample2 = DownSample_Generator(in_channels=128,
                                                 out_channels=256,
                                                 kernel_size=3,
                                                 stride=2,
