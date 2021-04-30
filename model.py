@@ -35,9 +35,9 @@ class ResidualBlock(nn.Module):
 
         return output + input
 
-class downSample_Generator(nn.Module):
+class DownSample_Generator(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size=3, stride=2, padding=1):
-        super(downSample_Generator, self).__init__()
+        super(DownSample_Generator, self).__init__()
 
         self.convLayer = nn.Sequential(nn.Conv2d(in_channels, out_channels, kernel_size, stride, padding),
                                        nn.InstanceNorm2d(out_channels)
