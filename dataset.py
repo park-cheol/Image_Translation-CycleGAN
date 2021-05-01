@@ -20,7 +20,7 @@ class ImageDataset(torch.utils.data.Dataset):
         """glob: 파일들의 리시트를 뽑을 때 사용, 경로명을 이용해서 가져올 수 있다.
         glob.glob('*.exe') # 현재 디렉토리에서 모든 .exe파일
         glob.glob('file?.*') # file1.txt file1.exe file2.txt .....
-        glob.glob(r'data/U*') # data파일에서 u시작하는 파일
+        glob.glob(r'dataset/U*') # data파일에서 u시작하는 파일
         """
     """슬라이싱을 구현할 수 있도록 도우며 리스트에서 슬라이싱을 하게 되면 내부적으로 이 메소드를 실행
     객체에서도 슬라이싱을 하기위해서는 이 메소드가 필수적
