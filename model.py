@@ -125,7 +125,7 @@ class GeneratorResNet(nn.Module): # 이미지 사진 [channel, width ,height]
             residualLayer3 = self.residualLayer3(residualLayer2)
             residualLayer4 = self.residualLayer4(residualLayer3)
             residualLayer5 = self.residualLayer5(residualLayer4)
-            residualLayer9 = self.residualLayer6(residualLayer5)
+            last_residualLayer = self.residualLayer6(residualLayer5)
 
         else: # residual_blocks 9개
             residualLayer1 = self.residualLayer1(downsample_2_relu)
@@ -136,10 +136,10 @@ class GeneratorResNet(nn.Module): # 이미지 사진 [channel, width ,height]
             residualLayer6 = self.residualLayer6(residualLayer5)
             residualLayer7 = self.residualLayer7(residualLayer6)
             residualLayer8 = self.residualLayer8(residualLayer7)
-            residualLayer9 = self.residualLayer9(residualLayer8)
+            last_residualLayer = self.residualLayer9(residualLayer8)
 
         # Upsample Layer
-        upsample1 = self.upsample1(residualLayer9)
+        upsample1 = self.upsample1(last_residualLayer)
         upsample1_relu = self.relu(upsample1)
         upsample2 = self.upsample2(upsample1_relu)
         upsample2_relu = self.relu(upsample2)
@@ -148,7 +148,7 @@ class GeneratorResNet(nn.Module): # 이미지 사진 [channel, width ,height]
         last_convLayer = self.last_convlayer(upsample2_relu)
         output = self.tanh(last_convLayer)
 
-        return output
+        return output # [1, 3, 256, 256]
 
 ##############################
 #       Discriminator
@@ -197,7 +197,7 @@ class Discriminator(nn.Module):
         zeropad = self.zeropad(convLayer_4_relu)
         output = self.convLayer_5(zeropad)
 
-        return output
+        return output # [1, 1, 16, 16]
 
 
 
