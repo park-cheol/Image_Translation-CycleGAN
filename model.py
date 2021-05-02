@@ -1,19 +1,6 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
-def weights_init_normal(m):
-    classname = m.__class__.__name__ # 부모가 아닌 현재 클래스명을 상속(다시)
-    if classname.find("Conv") != -1:
-        torch.nn.init.normal_(m.weight.data, 0.0, 0.02)
-        if hasattr(m, "bias") and m.bias is not None: # bias 여부
-            # hasattr(obj, name) : obj의 attribute에 name 존재 여부
-            torch.nn.init.normal_(m.bias.data, 0.0)
-
-    elif classname.find("BatchNorm2d") != -1:
-        torch.nn.init.normal_(m.weight.data, 1.0, 0.02)
-        torch.nn.init.constant_(m.bias.data, 0.0)
-
 ####################################
 #       Generator
 ####################################
@@ -89,8 +76,11 @@ class GeneratorResNet(nn.Module): # 이미지 사진 [channel, width ,height]
                                                 padding=1)
 
         # Residual blcoks
-        for i in range(1, self.num_residual_blocks + 1):
-            locals()['self.residualLayer{}'.format(i)] = ResidualBlock(256)
+        # 에러가 남 일단 주석처리
+        #for i in range(1, self.num_residual_blocks + 1):
+        #    locals()['self.residualLayer{}'.format(i)] = ResidualBlock(256)
+
+        self.residualLayer = ResidualBlock(256)
 
         # Upsample
         self.upsample1 = Upsampling_Generator(in_channels=256,
@@ -119,24 +109,24 @@ class GeneratorResNet(nn.Module): # 이미지 사진 [channel, width ,height]
         downsample_2_relu = self.relu(downsample_2)
 
         # Residual Layer
-        if self.num_residual_blocks == 6:
-            residualLayer1 = self.residualLayer1(downsample_2_relu)
-            residualLayer2 = self.residualLayer2(residualLayer1)
-            residualLayer3 = self.residualLayer3(residualLayer2)
-            residualLayer4 = self.residualLayer4(residualLayer3)
-            residualLayer5 = self.residualLayer5(residualLayer4)
-            last_residualLayer = self.residualLayer6(residualLayer5)
+        # 6은 일단 주석처리
+        #if .num_residual_blocks == 6:
+        #    residualLayer1 = self.residualLayer(downsample_2_relu)
+        #    residualLayer2 = self.residualLayer2(residualLayer1)
+        #    residualLayer3 = self.residualLayer3(residualLayer2)
+        #    residualLayer4 = self.residualLayer4(residualLayer3)
+        #    residualLayer5 = self.residualLayer5(residualLayer4)
+        #    last_residualLayer = self.residualLayer6(residualLayer5)
 
-        else: # residual_blocks 9개
-            residualLayer1 = self.residualLayer1(downsample_2_relu)
-            residualLayer2 = self.residualLayer2(residualLayer1)
-            residualLayer3 = self.residualLayer3(residualLayer2)
-            residualLayer4 = self.residualLayer4(residualLayer3)
-            residualLayer5 = self.residualLayer5(residualLayer4)
-            residualLayer6 = self.residualLayer6(residualLayer5)
-            residualLayer7 = self.residualLayer7(residualLayer6)
-            residualLayer8 = self.residualLayer8(residualLayer7)
-            last_residualLayer = self.residualLayer9(residualLayer8)
+        residualLayer1 = self.residualLayer(downsample_2_relu)
+        residualLayer2 = self.residualLayer(residualLayer1)
+        residualLayer3 = self.residualLayer(residualLayer2)
+        residualLayer4 = self.residualLayer(residualLayer3)
+        residualLayer5 = self.residualLayer(residualLayer4)
+        residualLayer6 = self.residualLayer(residualLayer5)
+        residualLayer7 = self.residualLayer(residualLayer6)
+        residualLayer8 = self.residualLayer(residualLayer7)
+        last_residualLayer = self.residualLayer(residualLayer8)
 
         # Upsample Layer
         upsample1 = self.upsample1(last_residualLayer)
