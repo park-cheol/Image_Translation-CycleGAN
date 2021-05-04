@@ -145,139 +145,152 @@ def main_worker(input_shape, args):
         num_workers=args.workers,
     )
 
-    # train
-    for epoch in range(args.start_epoch, args.epochs):# TODO train인자가 너무 많다
-        start_time_epoch = time.time()
-        for i, batch in enumerate(dataloader): # dataloader return {"A": item_A, "B": item_B}
-
-            real_A = Variable(batch['A'].type(Tensor)) # [batch:1, channel:3, 256, 256]
-            real_B = Variable(batch['B'].type(Tensor))
-
-            # x.output_shape = (1, height // 16, width // 16): patch size
-            # [1, 1, 16, 16]
-            valid = Variable(Tensor(np.ones((real_A.size(0), *discriminator_A.output_shape))), requires_grad=False)
-            fake = Variable(Tensor(np.zeros((real_A.size(0), *discriminator_A.output_shape))), requires_grad=False)
-
-            #####################
-            #   Generator loss
-            #####################
-            generator_A2B.train()
-            generator_B2A.train()
-
-            generator_optimizer.zero_grad()
-
-            # GAN MSELoss
-            fake_B = generator_A2B(real_A)
-            fake_A = generator_B2A(real_B)
-            loss_GAN_A2B = criterion_GAN(discriminator_B(fake_B), valid) # |D(G(x))-1|^2
-            loss_GAN_B2A = criterion_GAN(discriminator_A(fake_A), valid) # |D(F(y))-1|^2
-            loss_GAN = (loss_GAN_A2B + loss_GAN_B2A) / 2
-
-            # Cycle L1 loss
-            cycle_A = generator_B2A(fake_B)
-            cycle_B = generator_A2B(fake_A)
-            loss_cycle_A = criterion_cycle(cycle_A, real_A) # || F(G(x))-x ||
-            loss_cycle_B = criterion_cycle(cycle_B, real_B) # || G(F(y))-y ||
-            loss_cycle = (loss_cycle_A + loss_cycle_B) / 2
-
-            # Identity L1 loss
-            # 필수는 아니지만 두 도메인의 특징이 비슷할 때 넣어주면 더 좋은 성능을 보임
-            loss_id_A = criterion_idt(generator_B2A(real_A), real_A) # || F(x)-x ||
-            loss_id_B = criterion_idt(generator_A2B(real_B), real_B) # || G(y)-y ||
-            loss_id = (loss_id_A + loss_id_B) / 2
-
-            # Generator total loss
-            generator_loss = loss_GAN + args.lambda_cyc * loss_cycle + args.lambda_id * loss_id
-            generator_loss.backward()
-
-            generator_optimizer.step()
-
-            #####################
-            #   Discriminator A
-            #####################
-
-            discriminator_A_optimizer.zero_grad()
-            # ReplayBuffer fake image A
-            fake_A_ = fake_A_buffer.push_and_pop(fake_A)
-
-            # Real loss
-            loss_real_A = criterion_GAN(discriminator_A(real_A), valid) # |D_A(x)-1|^2
-            # fake loss
-            loss_fake_A = criterion_GAN(discriminator_A(fake_A_.detach()), fake) # | D_A(F(y))-0|^2
-
-            loss_discriminator_A = (loss_real_A + loss_fake_A) / 2
-
-            loss_discriminator_A.backward()
-            discriminator_A_optimizer.step()
-
-            #####################
-            #   Discriminator B
-            #####################
-
-            discriminator_B_optimizer.zero_grad()
-            fake_B_ = fake_B_buffer.push_and_pop(fake_B)
-
-            # Real loss
-            loss_real_B = criterion_GAN(discriminator_B(real_B), valid) # |D_B(y)-1| ^2
-            # fake loss
-            loss_fake_B = criterion_GAN(discriminator_B(fake_B_.detach()), fake) # |D_B(G(x))-0|^2
-
-            loss_discriminator_B = (loss_real_B + loss_fake_B) / 2
-
-            loss_discriminator_B.backward()
-            discriminator_B_optimizer.step()
-
-            # Discriminator total loss
-            discriminator_loss = (loss_discriminator_B + loss_discriminator_A) / 2
+    for epoch in range(args.start_epoch, args.epochs):#TODO def Train()은 무적권 만들기
 
 
-            # log
-            if (i+1) % 500 == 0:
-                pirnt_log(epoch, args.epochs, i, len(dataloader), discriminator_loss, generator_loss, loss_GAN, loss_cycle, loss_id)
+        # train
+        train(epoch, dataloader, discriminator_A, discriminator_B, generator_A2B, generator_B2A,
+          generator_optimizer, discriminator_A_optimizer, discriminator_B_optimizer, criterion_GAN,
+          criterion_cycle, criterion_idt, lr_scheduler_generator, lr_scheduler_discriminaotr_A,
+          lr_scheduler_discriminaotr_B, fake_A_buffer, fake_B_buffer, args)
+
+
+def train(epoch, dataloader, discriminator_A, discriminator_B, generator_A2B, generator_B2A,
+          generator_optimizer, discriminator_A_optimizer, discriminator_B_optimizer, criterion_GAN,
+          criterion_cycle, criterion_idt, lr_scheduler_generator, lr_scheduler_discriminaotr_A,
+          lr_scheduler_discriminaotr_B, fake_A_buffer, fake_B_buffer, args):
+    start_time_epoch = time.time()
+
+    for i, batch in enumerate(dataloader): # dataloader return {"A": item_A, "B": item_B}
+        real_A = Variable(batch['A'].type(Tensor)) # [batch:1, channel:3, 256, 256]
+        real_B = Variable(batch['B'].type(Tensor))
+
+        # x.output_shape = (1, height // 16, width // 16): patch size
+        # [1, 1, 16, 16]
+        valid = Variable(Tensor(np.ones((real_A.size(0), *discriminator_A.output_shape))), requires_grad=False)
+        fake = Variable(Tensor(np.zeros((real_A.size(0), *discriminator_A.output_shape))), requires_grad=False)
+
+        #####################
+        #   Generator loss
+        #####################
+        generator_A2B.train()
+        generator_B2A.train()
+
+        generator_optimizer.zero_grad()
+
+        # GAN MSELoss
+        fake_B = generator_A2B(real_A)
+        fake_A = generator_B2A(real_B)
+        loss_GAN_A2B = criterion_GAN(discriminator_B(fake_B), valid) # |D(G(x))-1|^2
+        loss_GAN_B2A = criterion_GAN(discriminator_A(fake_A), valid) # |D(F(y))-1|^2
+        loss_GAN = (loss_GAN_A2B + loss_GAN_B2A) / 2
+
+        # Cycle L1 loss
+        cycle_A = generator_B2A(fake_B)
+        cycle_B = generator_A2B(fake_A)
+        loss_cycle_A = criterion_cycle(cycle_A, real_A) # || F(G(x))-x ||
+        loss_cycle_B = criterion_cycle(cycle_B, real_B) # || G(F(y))-y ||
+        loss_cycle = (loss_cycle_A + loss_cycle_B) / 2
+
+        # Identity L1 loss
+        # 필수는 아니지만 두 도메인의 특징이 비슷할 때 넣어주면 더 좋은 성능을 보임
+        loss_id_A = criterion_idt(generator_B2A(real_A), real_A) # || F(x)-x ||
+        loss_id_B = criterion_idt(generator_A2B(real_B), real_B) # || G(y)-y ||
+        loss_id = (loss_id_A + loss_id_B) / 2
+
+        # Generator total loss
+        generator_loss = loss_GAN + args.lambda_cyc * loss_cycle + args.lambda_id * loss_id
+        generator_loss.backward()
+
+        generator_optimizer.step()
+
+        #####################
+        #   Discriminator A
+        #####################
+
+        discriminator_A_optimizer.zero_grad()
+        # ReplayBuffer fake image A
+        fake_A_ = fake_A_buffer.push_and_pop(fake_A)
+
+        # Real loss
+        loss_real_A = criterion_GAN(discriminator_A(real_A), valid) # |D_A(x)-1|^2
+        # fake loss
+        loss_fake_A = criterion_GAN(discriminator_A(fake_A_.detach()), fake) # | D_A(F(y))-0|^2
+
+        loss_discriminator_A = (loss_real_A + loss_fake_A) / 2
+
+        loss_discriminator_A.backward()
+        discriminator_A_optimizer.step()
+
+        #####################
+        #   Discriminator B
+        #####################
+
+        discriminator_B_optimizer.zero_grad()
+        fake_B_ = fake_B_buffer.push_and_pop(fake_B)
+
+        # Real loss
+        loss_real_B = criterion_GAN(discriminator_B(real_B), valid) # |D_B(y)-1| ^2
+        # fake loss
+        loss_fake_B = criterion_GAN(discriminator_B(fake_B_.detach()), fake) # |D_B(G(x))-0|^2
+
+        loss_discriminator_B = (loss_real_B + loss_fake_B) / 2
+
+        loss_discriminator_B.backward()
+        discriminator_B_optimizer.step()
+
+        # Discriminator total loss
+        discriminator_loss = (loss_discriminator_B + loss_discriminator_A) / 2
+
+
+        # log
+        if (i) % 100 == 0:
+            pirnt_log(epoch, args.epochs, i, len(dataloader), discriminator_loss, generator_loss, loss_GAN, loss_cycle, loss_id)
 
             # save sample
-            if i % args.sample_interval == 0:
-                images = next(iter(dataloader))
-                generator_A2B.eval() # dropout이나 정규화 X
-                generator_B2A.eval()
+        if i % args.sample_interval == 0:
+            images = next(iter(dataloader))
+            generator_A2B.eval() # dropout이나 정규화 X
+            generator_B2A.eval()
 
-                sample_real_A = Variable(images['A'].type(Tensor))
-                sample_real_B = Variable(images['B'].type(Tensor))
-                sample_fake_A = generator_B2A(sample_real_B)
-                sample_fake_B = generator_A2B(sample_real_A)
+            sample_real_A = Variable(images['A'].type(Tensor))
+            sample_real_B = Variable(images['B'].type(Tensor))
+            sample_fake_A = generator_B2A(sample_real_B)
+            sample_fake_B = generator_A2B(sample_real_A)
 
-                sample_real_A = torchvision.utils.make_grid(sample_real_A, nrow=3, normalize=True)
-                sample_real_B = torchvision.utils.make_grid(sample_real_B, nrow=3, normalize=True)
-                sample_fake_A = torchvision.utils.make_grid(sample_fake_A, nrow=3, normalize=True)
-                sample_fake_B = torchvision.utils.make_grid(sample_fake_B, nrow=3, normalize=True)
+            sample_real_A = torchvision.utils.make_grid(sample_real_A, nrow=3, normalize=True)
+            sample_real_B = torchvision.utils.make_grid(sample_real_B, nrow=3, normalize=True)
+            sample_fake_A = torchvision.utils.make_grid(sample_fake_A, nrow=3, normalize=True)
+            sample_fake_B = torchvision.utils.make_grid(sample_fake_B, nrow=3, normalize=True)
 
-                image_grid = torch.cat((sample_real_A, sample_fake_B, sample_real_B, sample_fake_A), 1)
-                torchvision.utils.save_image(image_grid, "images/%s/%s_epoch_%s.png" % (args.dataset_name, epoch, i), normalize=False)
+            image_grid = torch.cat((sample_real_A, sample_fake_B, sample_real_B, sample_fake_A), 1)
+            torchvision.utils.save_image(image_grid, "images/%s/%s_epoch_%s.png" % (args.dataset_name, epoch, i), normalize=False)
 
-        # 1 epoch 마다 시간 측정
-        sec = time.time() - start_time_epoch
-        print('%d epoch time: ', datetime.timedelta(seconds=sec), '\n')
+    # Update learning rate
+    lr_scheduler_generator.step()
+    lr_scheduler_discriminaotr_A.step()
+    lr_scheduler_discriminaotr_B.step()
 
-        # Update learning rate
-        lr_scheduler_generator.step()
-        lr_scheduler_discriminaotr_A.step()
-        lr_scheduler_discriminaotr_B.step()
+    # save model checkpoint
+    if args.checkpoint_interval != -1 and epoch % args.checkpoint_interval == 0:
+        torch.save(generator_A2B.state_dict(), "saved_models/%s/G_A2B_%d.pth" % (args.dataset_name, epoch+1))
+        torch.save(generator_B2A.state_dict(), "saved_models/%s/G_B2A_%d.pth" % (args.dataset_name, epoch+1))
+        torch.save(discriminator_A.state_dict(), "saved_models/%s/D_A_%d.pth" % (args.dataset_name, epoch+1))
+        torch.save(discriminator_B.state_dict(), "saved_models/%s/D_B_%d.pth" % (args.dataset_name, epoch+1))
 
-        # save model checkpoint
-        if args.checkpoint_interval != -1 and epoch % args.checkpoint_interval == 0:
-            torch.save(generator_A2B.state_dict(), "saved_models/%s/G_A2B_%d.pth" % (args.dataset_name, epoch+1))
-            torch.save(generator_B2A.state_dict(), "saved_models/%s/G_B2A_%d.pth" % (args.dataset_name, epoch+1))
-            torch.save(discriminator_A.state_dict(), "saved_models/%s/D_A_%d.pth" % (args.dataset_name, epoch+1))
-            torch.save(discriminator_B.state_dict(), "saved_models/%s/D_B_%d.pth" % (args.dataset_name, epoch+1))
-
+    # elapsed time
+    sec = time.time() - start_time_epoch
+    print('%d epoch time: ', datetime.timedelta(seconds=sec), '\n')
 
 
 
 
 
 def pirnt_log(epoch, total_epoch, iter, total_iter, D_loss ,G_loss, G_adv_loss, G_cycle_loss, G_id_loss):
-    print("\r[Epoch %d/%d] [Iter %d/%d] [D loss: %f] [G loss: %f -> adv: %f, cycle: %f, identity: %f] \n"
+    print("\r[Epoch %d/%d] [Iter %d/%d] [D loss: %f] [G loss: %f -> adv: %f, cycle: %f, identity: %f]"
           % (epoch, total_epoch, iter, total_iter, D_loss, G_loss, G_adv_loss, G_cycle_loss, G_id_loss))
+
+
 
 def adjust_learning_rate(optimizer, args):
     lr_scheduler = torch.optim.lr_scheduler.LambdaLR(
