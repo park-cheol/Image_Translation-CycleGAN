@@ -145,7 +145,7 @@ def main_worker(input_shape, args):
         num_workers=args.workers,
     )
 
-    for epoch in range(args.start_epoch, args.epochs):#TODO def Train()은 무적권 만들기
+    for epoch in range(args.start_epoch, args.epochs):
 
 
         # train

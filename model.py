@@ -8,22 +8,28 @@ class ResidualBlock(nn.Module):
     def __init__(self, in_channels):
         super(ResidualBlock, self).__init__()
 
-        self.conv2d_layer = nn.Sequential(nn.ReflectionPad2d(1),
+        # 동일한 Sequential이 들어가기에 conv2d_layer를 하나만 선언하고 forward 사용
+        # 이는 잘못된 방법
+        self.conv2d_layer1 = nn.Sequential(nn.ReflectionPad2d(1),
                                            nn.Conv2d(in_channels, in_channels, 3),
-                                           nn.InstanceNorm2d(in_channels)
+                                           nn.InstanceNorm2d(in_channels),
                                            )
+
+        self.conv2d_layer2 = nn.Sequential(nn.ReflectionPad2d(1),
+                                          nn.Conv2d(in_channels, in_channels, 3),
+                                          nn.InstanceNorm2d(in_channels),
+                                          )
 
         self.relu = nn.ReLU(inplace=True)
 
     def forward(self, input):
-        output = self.conv2d_layer(input) # in_channel = out_channel, kernel_size = 3
+        output = self.conv2d_layer1(input) # in_channel = out_channel, kernel_size = 3
         output = self.relu(output)
-        output = self.conv2d_layer(output)
-
-        return output + input
+        output = self.conv2d_layer2(output)
+        return input + output
 
 class DownSample_Generator(nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size=3, stride=2, padding=1):
+    def __init__(self, in_channels, out_channels, kernel_size, stride, padding):
         super(DownSample_Generator, self).__init__()
 
         self.convLayer = nn.Sequential(nn.Conv2d(in_channels, out_channels, kernel_size, stride, padding),
@@ -31,11 +37,11 @@ class DownSample_Generator(nn.Module):
                                        )
 
     def forward(self, input):
-        input = self.convLayer(input)
-        return input
+        output = self.convLayer(input)
+        return output
 
 class Upsampling_Generator(nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size=3, stride=2, padding=1):
+    def __init__(self, in_channels, out_channels, kernel_size, stride, padding):
         super(Upsampling_Generator, self).__init__()
 
         self.convLayer = nn.Sequential(nn.Upsample(scale_factor=2),
@@ -44,23 +50,23 @@ class Upsampling_Generator(nn.Module):
                                        )
 
     def forward(self, input):
-        input = self.convLayer(input)
-        return input
+        output = self.convLayer(input)
+        return output
 
 class GeneratorResNet(nn.Module): # 이미지 사진 [channel, width ,height]
-    def __init__(self, input_shape, num_residual_blocks):
+    def __init__(self, input_shape, num_residual_blocks=9):
+        # 우선 그냥 9로 코드 구현
         # input_shpae = list
         super(GeneratorResNet, self).__init__()
         channels = input_shape[0]
-        self.num_residual_blocks = num_residual_blocks
 
         self.relu = nn.ReLU(inplace=True)
         self.tanh = nn.Tanh()
         # Initial Convolution block
         self.first_convlayer = nn.Sequential(nn.ReflectionPad2d(channels),
-                                   nn.Conv2d(channels, 64, 7),
-                                   nn.InstanceNorm2d(64),
-                                   )
+                                             nn.Conv2d(channels, 64, 7),
+                                             nn.InstanceNorm2d(64),
+                                             )
 
         # DownSampling
         self.downsample1 = DownSample_Generator(in_channels=64,
@@ -76,20 +82,32 @@ class GeneratorResNet(nn.Module): # 이미지 사진 [channel, width ,height]
                                                 padding=1)
 
         # Residual blcoks
-        # 에러가 남 일단 주석처리
+        # 에러) 일단 주석처리
         #for i in range(1, self.num_residual_blocks + 1):
         #    locals()['self.residualLayer{}'.format(i)] = ResidualBlock(256)
 
-        self.residualLayer = ResidualBlock(256)
+        ###### 잘못된 코드인지 확인
+        # self.residualLayer = ResidualBlock(256)
+        self.residualLayer1 = ResidualBlock(256)
+        self.residualLayer2 = ResidualBlock(256)
+        self.residualLayer3 = ResidualBlock(256)
+        self.residualLayer4 = ResidualBlock(256)
+        self.residualLayer5 = ResidualBlock(256)
+        self.residualLayer6 = ResidualBlock(256)
+        self.residualLayer7 = ResidualBlock(256)
+        self.residualLayer8 = ResidualBlock(256)
+        self.residualLayer9 = ResidualBlock(256)
 
         # Upsample
         self.upsample1 = Upsampling_Generator(in_channels=256,
                                               out_channels=128,
+                                              kernel_size=3,
                                               stride=1,
                                               padding=1
                                               )
         self.upsample2 = Upsampling_Generator(in_channels=128,
                                               out_channels=64,
+                                              kernel_size=3,
                                               stride=1,
                                               padding=1
                                               )
@@ -118,15 +136,17 @@ class GeneratorResNet(nn.Module): # 이미지 사진 [channel, width ,height]
         #    residualLayer5 = self.residualLayer5(residualLayer4)
         #    last_residualLayer = self.residualLayer6(residualLayer5)
 
-        residualLayer1 = self.residualLayer(downsample_2_relu)
-        residualLayer2 = self.residualLayer(residualLayer1)
-        residualLayer3 = self.residualLayer(residualLayer2)
-        residualLayer4 = self.residualLayer(residualLayer3)
-        residualLayer5 = self.residualLayer(residualLayer4)
-        residualLayer6 = self.residualLayer(residualLayer5)
-        residualLayer7 = self.residualLayer(residualLayer6)
-        residualLayer8 = self.residualLayer(residualLayer7)
-        last_residualLayer = self.residualLayer(residualLayer8)
+        residualLayer1 = self.residualLayer1(downsample_2_relu)
+        residualLayer2 = self.residualLayer2(residualLayer1)
+        residualLayer3 = self.residualLayer3(residualLayer2)
+        residualLayer4 = self.residualLayer4(residualLayer3)
+        residualLayer5 = self.residualLayer5(residualLayer4)
+        residualLayer6 = self.residualLayer6(residualLayer5)
+        residualLayer7 = self.residualLayer7(residualLayer6)
+        residualLayer8 = self.residualLayer8(residualLayer7)
+        last_residualLayer = self.residualLayer9(residualLayer8)
+
+
 
         # Upsample Layer
         upsample1 = self.upsample1(last_residualLayer)
@@ -188,9 +208,8 @@ class Discriminator(nn.Module):
         output = self.convLayer_5(zeropad)
 
         return output # [1, 1, 16, 16]
-
-
-
+# 참고 torch.manual_seed가 난수 생성 메서드 하나당 하나씩 만들어야함
+# EX) torch.manual_seed(seed) -> randn -> 또 manual_seed -> randn 되더라
 
 
 
