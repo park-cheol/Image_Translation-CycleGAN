@@ -12,9 +12,14 @@ import time
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.backends.cudnn as cudnn
 import torch.utils
 import torch.utils.data
+import torch.utils.data.distributed
+import torch.nn.parallel
+import torch.backends.cudnn as cudnn
+import torch.distributed as dist
+import torch.multiprocessing as mp
+
 import torchvision
 import torchvision.utils
 import torchvision.transforms as transforms
@@ -47,7 +52,24 @@ parser.add_argument("--n_residual_blocks", type=int, default=9, help="number of 
 # lambda값 논문 그대로 적용
 parser.add_argument("--lambda_cyc", type=float, default=10.0, help="cycle loss weight")
 parser.add_argument("--lambda_id", type=float, default=5.0, help="identity loss weight")
+# distributed training
+parser.add_argument("--world-size", default=-1, type=int,
+                    help='number of nodes for distributed training ')
+parser.add_argument("--rank", default=-1, type=int,
+                    help='node rank for distributed training ') # node의 아이디
+parser.add_argument('--dist-url', default='tcp://224.66.41.62:23456', type=str,
+                    help='url used to set up distributed training')
+parser.add_argument('--dist-backend', default='nccl', type=str,
+                    help='distributed backend')
+parser.add_argument('--gpu', default=None, type=int,
+                    help='GPU id to use.')
+parser.add_argument('--multiprocessing-distributed', action='store_true',
+                    help='Use multi-processing distributed training to launch '
+                         'N processes per node, which has N GPUs. This is the '
+                         'fastest way to use PyTorch for either single node or '
+                         'multi node data parallel training ')
 
+# Gloo backend 형식 device('cuda')
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 Tensor = torch.cuda.FloatTensor if torch.cuda.is_available() else torch.Tensor
 
@@ -71,25 +93,123 @@ def main():
         os.makedirs('images/%s' % args.dataset_name, exist_ok=True)
         os.makedirs('saved_models/%s' % args.dataset_name, exist_ok=True)
 
+    if args.gpu is not None:
+        warnings.warn('You have chosen a specific GPU. This will completely '
+                      'disable data parallelism.')
+
+    if args.dist_url == "env://" and args.world_size == -1: #TODO env:// 와 tcp
+        args.world_size = int(os.environ["WORLD_SIZE"])
+        # 전체 프로세스 수 - 마스터가 얼마나 많은 worker들을 기다릴지 알 수 있다.
+
+    # node(server, 본체) 2개 이상 이거나 multiprocessing_distributed가 TURE
+    args.distributed = args.world_size > 1 or args.multiprocessing_distributed
+
+    ngpus_per_node = torch.cuda.device_count() # node: server(기계)라고 생각
+
+    if args.multiprocessing_distributed:
+        args.world_size = ngpus_per_node * args.world_size
+        # world_size: 총 processes 크기 (usually 1gpu = 1process)
+        # world_size => 서버(기계)1개당 gpu 수 * 기계 수
+        # args.world_size help='총 노드 수'
+        # Since we have ngpus_per_node processes per node, the total world_size
+        # needs to be adjusted accordingly
+        mp.spawn(main_worker, nprocs=ngpus_per_node, args=(ngpus_per_node, args))
+        # torch.multiprocessing.spawn
+        # (fn, args=(), nprocs=1, join=True, daemon=False, start_method='spawn')
+        # Spawns nprocs processes that run fn with args: n개의 processes로 fn 실행
+        # args: fn에 넘겨줄 인자들
+    else:
+        main_worker(args.gpu, ngpus_per_node, args)
+
+def main_worker(gpu, ngpus_per_node, args):
     input_shape = (args.channels, args.img_height, args.img_width)
+    # PatchGan 70 x 70
+    output_shape = (1, args.img_height // 2 ** 4, args.img_width // 2 ** 4)
 
-    main_worker(input_shape, args)
-
-def main_worker(input_shape, args):
-    # Loss 설정
-    # L1 L2 상관없지만 L1이 좀 더 경미하게 실험적으로 좋음
-    criterion_GAN = nn.MSELoss().to(device) # lsGAn
-    criterion_cycle = nn.L1Loss().to(device) # L1 loss Low frequency
-    criterion_idt = nn.L1Loss().to(device)
+    args.gpu = gpu
 
     # initial Generator and Discriminator
     # c7s1-64, d128, d256, R256(x6,x9), u128, u64, c7s1-3
-    generator_A2B = GeneratorResNet(input_shape, args.n_residual_blocks).to(device)
-    generator_B2A = GeneratorResNet(input_shape, args.n_residual_blocks).to(device)
+    generator_A2B = GeneratorResNet(input_shape, args.n_residual_blocks)
+    generator_B2A = GeneratorResNet(input_shape, args.n_residual_blocks)
 
     # c64-c128-c256-c512
-    discriminator_A = Discriminator(input_shape).to(device)
-    discriminator_B = Discriminator(input_shape).to(device)
+    discriminator_A = Discriminator(input_shape)
+    discriminator_B = Discriminator(input_shape)
+
+    if args.gpu is not None:
+        print("Use GPU: {} for training".format(args.gpu))
+
+    if args.distributed: # 초기화
+        if args.dist_url == "env://" and args.rank == -1: # RANK 지정 X 경우
+            args.rank = int(os.environ["RANK"])
+        if args.multiprocessing_distributed:
+            # 멀티 프로세싱을 하기 위해서 rank는 모든 프로세스 중의 global rank를 필요함
+            args.rank = args.rank * ngpus_per_node + gpu
+            # 순서대로 rank를 지정해줌 e.g)node 2 with 4gpu
+            # node=0 -> rank[0, 1, 2, 3] node=1 -> rank[4, 5, 6, 7]
+        dist.init_process_group(backend=args.dist_backend, init_method=args.dist_url,
+                                world_size=args.world_size, rank=args.rank)
+        # torch.distributed.init_process_group(backend, init_method=None, timeout=datetime.timedelta(0, 1800), world_size=-1, rank=-1, store=None, group_name=''
+        # distributed process group을 초기화, distributed package또한
+
+
+    if not torch.cuda.is_available(): # GPU가 없을 시
+        print('using CPU, this will be slow')
+    elif args.distributed:
+        # 멀티프로세싱 distributed 경우, 반드시 단일 장치범위(single device scope) 지정해야함
+        # 그렇게 안하면 사용 가능한 모든 device를 사용
+        if args.gpu is not None:
+            torch.cuda.set_device(args.gpu) # 특정 gpu 설정
+            generator_A2B.cuda(args.gpu)
+            generator_B2A.cuda(args.gpu)
+            discriminator_A.cuda(args.gpu)
+            discriminator_B.cuda(args.gpu)
+
+            # per process와 DistributedDataparallel=> single GPU 사용 할 때
+            # batchsize를 가지고 있는 총 gpu을 기점으로 나눠 줄 필요가 있다.
+            args.batch_size = int(args.batch_size / ngpus_per_node)
+            # workers: batch generation 때 사용 할 cpu thread 수
+            args.workers = int((args.workers + ngpus_per_node - 1) / ngpus_per_node)
+
+            generator_A2B = nn.parallel.DistributedDataParallel(generator_A2B, device_ids=[args.gpu])
+            generator_B2A = nn.parallel.DistributedDataParallel(generator_B2A, device_ids=[args.gpu])
+            discriminator_A = nn.parallel.DistributedDataParallel(discriminator_A, device_ids=[args.gpu])
+            discriminator_B = nn.parallel.DistributedDataParallel(discriminator_B, device_ids=[args.gpu])
+
+        else:
+            # device_ids를 설정해주지 않으면 모든 사용가능한 GPU로 batchsize 나누고 할당
+            generator_A2B.cuda(args.gpu)
+            generator_B2A.cuda(args.gpu)
+            discriminator_A.cuda(args.gpu)
+            discriminator_B.cuda(args.gpu)
+
+            generator_A2B = nn.parallel.DistributedDataParallel(generator_A2B)
+            generator_B2A = nn.parallel.DistributedDataParallel(generator_B2A)
+            discriminator_A = nn.parallel.DistributedDataParallel(discriminator_A)
+            discriminator_B = nn.parallel.DistributedDataParallel(discriminator_B)
+
+    elif args.gpu is not None:
+        # distributed X, Dataparallel X
+        torch.cuda.set_device(args.gpu)
+        generator_A2B = generator_A2B.cuda(args.gpu)
+        generator_B2A = generator_B2A.cuda(args.gpu)
+        discriminator_A = discriminator_A.cuda(args.gpu)
+        discriminator_B = discriminator_B.cuda(args.gpu)
+
+    else:
+        # DataParallel은 사용가능한 gpu에다가 batchsize을 나누고 할당
+        generator_A2B = nn.DataParallel(generator_A2B).cuda(args.gpu)
+        generator_B2A = nn.DataParallel(generator_B2A).cuda(args.gpu)
+        discriminator_A = nn.DataParallel(discriminator_A).cuda(args.gpu)
+        discriminator_B = nn.DataParallel(discriminator_B).cuda(args.gpu)
+
+    # Loss 설정
+    # L1 L2 상관없지만 L1이 좀 더 경미하게 실험적으로 좋음
+    criterion_GAN = nn.MSELoss().cuda(args.gpu) # lsGAn
+    criterion_cycle = nn.L1Loss().cuda(args.gpu) # L1 loss Low frequency
+    criterion_idt = nn.L1Loss().cuda(args.gpu)
+
 
     if args.start_epoch != 0: # 저장해놓은 checkpoint가 있으면 실행
         generator_A2B.load_state_dict(torch.load('saved_models/%s/G_A2B_%d.pth' % (args.dataset_name, args.epoch)))
@@ -137,6 +257,14 @@ def main_worker(input_shape, args):
         transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
     ]
 
+    if args.distributed:
+        train_sampler = torch.utils.data.distributed.DistributedSampler(
+            ImageDataset('data/%s' % args.dataset_name, transforms_=transforms_, unaligned=True, mode='train')
+        )
+
+    else:
+        train_sampler = None
+
     # Dataset loader(train)
     dataloader = torch.utils.data.DataLoader(
         ImageDataset('data/%s' % args.dataset_name, transforms_=transforms_, unaligned=True, mode='train'),
@@ -146,19 +274,20 @@ def main_worker(input_shape, args):
     )
 
     for epoch in range(args.start_epoch, args.epochs):
-
+        if args.distributed:
+            train_sampler.set_epoch(epoch)
 
         # train
         train(epoch, dataloader, discriminator_A, discriminator_B, generator_A2B, generator_B2A,
-          generator_optimizer, discriminator_A_optimizer, discriminator_B_optimizer, criterion_GAN,
-          criterion_cycle, criterion_idt, lr_scheduler_generator, lr_scheduler_discriminaotr_A,
-          lr_scheduler_discriminaotr_B, fake_A_buffer, fake_B_buffer, args)
+              generator_optimizer, discriminator_A_optimizer, discriminator_B_optimizer, criterion_GAN,
+              criterion_cycle, criterion_idt, lr_scheduler_generator, lr_scheduler_discriminaotr_A,
+              lr_scheduler_discriminaotr_B, fake_A_buffer, fake_B_buffer, output_shape, args)
 
 
 def train(epoch, dataloader, discriminator_A, discriminator_B, generator_A2B, generator_B2A,
           generator_optimizer, discriminator_A_optimizer, discriminator_B_optimizer, criterion_GAN,
           criterion_cycle, criterion_idt, lr_scheduler_generator, lr_scheduler_discriminaotr_A,
-          lr_scheduler_discriminaotr_B, fake_A_buffer, fake_B_buffer, args):
+          lr_scheduler_discriminaotr_B, fake_A_buffer, fake_B_buffer, output_shape, args):
     start_time_epoch = time.time()
 
     for i, batch in enumerate(dataloader): # dataloader return {"A": item_A, "B": item_B}
@@ -167,8 +296,8 @@ def train(epoch, dataloader, discriminator_A, discriminator_B, generator_A2B, ge
 
         # x.output_shape = (1, height // 16, width // 16): patch size
         # [1, 1, 16, 16]
-        valid = Variable(Tensor(np.ones((real_A.size(0), *discriminator_A.output_shape))), requires_grad=False)
-        fake = Variable(Tensor(np.zeros((real_A.size(0), *discriminator_A.output_shape))), requires_grad=False)
+        valid = Variable(Tensor(np.ones((real_A.size(0), *output_shape))), requires_grad=False)
+        fake = Variable(Tensor(np.zeros((real_A.size(0), *output_shape))), requires_grad=False)
 
         #####################
         #   Generator loss
@@ -244,7 +373,7 @@ def train(epoch, dataloader, discriminator_A, discriminator_B, generator_A2B, ge
 
 
         # log
-        if (i) % 100 == 0:
+        if (i) % 1 == 0:
             pirnt_log(epoch, args.epochs, i, len(dataloader), discriminator_loss, generator_loss, loss_GAN, loss_cycle, loss_id)
 
             # save sample
@@ -281,9 +410,6 @@ def train(epoch, dataloader, discriminator_A, discriminator_B, generator_A2B, ge
     # elapsed time
     sec = time.time() - start_time_epoch
     print('%d epoch time: ', datetime.timedelta(seconds=sec), '\n')
-
-
-
 
 
 def pirnt_log(epoch, total_epoch, iter, total_iter, D_loss ,G_loss, G_adv_loss, G_cycle_loss, G_id_loss):

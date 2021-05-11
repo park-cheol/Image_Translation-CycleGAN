@@ -172,8 +172,6 @@ class Discriminator(nn.Module):
         # input_shape (3, 256, 256)
         channels, height, width = input_shape
 
-        # PatchGan 70 x 70
-        self.output_shape = (1, height // 2 ** 4, width // 2 ** 4)
         # initial conv
         self.leakyrelu = nn.LeakyReLU(0.2, inplace=True)
         self.zeropad = nn.ZeroPad2d((1, 0, 1, 0))
