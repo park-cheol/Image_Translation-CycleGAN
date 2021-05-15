@@ -171,6 +171,7 @@ class Discriminator(nn.Module):
         super(Discriminator, self).__init__()
         # input_shape (3, 256, 256)
         channels, height, width = input_shape
+        self.output_shape = (1, height // 2 ** 4, width // 2 ** 4)
 
         # initial conv
         self.leakyrelu = nn.LeakyReLU(0.2, inplace=True)
@@ -208,14 +209,6 @@ class Discriminator(nn.Module):
         return output # [1, 1, 16, 16]
 # 참고 torch.manual_seed가 난수 생성 메서드 하나당 하나씩 만들어야함
 # EX) torch.manual_seed(seed) -> randn -> 또 manual_seed -> randn 되더라
-
-
-
-
-
-
-
-
 
 
 

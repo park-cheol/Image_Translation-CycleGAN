@@ -70,7 +70,6 @@ parser.add_argument('--multiprocessing-distributed', action='store_true',
                          'multi node data parallel training ')
 
 # Gloo backend 형식 device('cuda')
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 Tensor = torch.cuda.FloatTensor if torch.cuda.is_available() else torch.Tensor
 
 #cuda = torch.cuda.is_available()
@@ -307,6 +306,12 @@ def train(epoch, dataloader, discriminator_A, discriminator_B, generator_A2B, ge
 
         generator_optimizer.zero_grad()
 
+        # Identity L1 loss
+        # 필수는 아니지만 두 도메인의 특징이 비슷할 때 넣어주면 더 좋은 성능을 보임
+        loss_id_A = criterion_idt(generator_B2A(real_A), real_A) # || F(x)-x ||
+        loss_id_B = criterion_idt(generator_A2B(real_B), real_B) # || G(y)-y ||
+        loss_id = (loss_id_A + loss_id_B) / 2
+
         # GAN MSELoss
         fake_B = generator_A2B(real_A)
         fake_A = generator_B2A(real_B)
@@ -321,11 +326,6 @@ def train(epoch, dataloader, discriminator_A, discriminator_B, generator_A2B, ge
         loss_cycle_B = criterion_cycle(cycle_B, real_B) # || G(F(y))-y ||
         loss_cycle = (loss_cycle_A + loss_cycle_B) / 2
 
-        # Identity L1 loss
-        # 필수는 아니지만 두 도메인의 특징이 비슷할 때 넣어주면 더 좋은 성능을 보임
-        loss_id_A = criterion_idt(generator_B2A(real_A), real_A) # || F(x)-x ||
-        loss_id_B = criterion_idt(generator_A2B(real_B), real_B) # || G(y)-y ||
-        loss_id = (loss_id_A + loss_id_B) / 2
 
         # Generator total loss
         generator_loss = loss_GAN + args.lambda_cyc * loss_cycle + args.lambda_id * loss_id
@@ -378,22 +378,8 @@ def train(epoch, dataloader, discriminator_A, discriminator_B, generator_A2B, ge
 
             # save sample
         if i % args.sample_interval == 0:
-            images = next(iter(dataloader))
-            generator_A2B.eval() # dropout이나 정규화 X
-            generator_B2A.eval()
+            sample_images(epoch, i, real_A, real_B, generator_A2B, generator_B2A)
 
-            sample_real_A = Variable(images['A'].type(Tensor))
-            sample_real_B = Variable(images['B'].type(Tensor))
-            sample_fake_A = generator_B2A(sample_real_B)
-            sample_fake_B = generator_A2B(sample_real_A)
-
-            sample_real_A = torchvision.utils.make_grid(sample_real_A, nrow=3, normalize=True)
-            sample_real_B = torchvision.utils.make_grid(sample_real_B, nrow=3, normalize=True)
-            sample_fake_A = torchvision.utils.make_grid(sample_fake_A, nrow=3, normalize=True)
-            sample_fake_B = torchvision.utils.make_grid(sample_fake_B, nrow=3, normalize=True)
-
-            image_grid = torch.cat((sample_real_A, sample_fake_B, sample_real_B, sample_fake_A), 1)
-            torchvision.utils.save_image(image_grid, "images/%s/%s_epoch_%s.png" % (args.dataset_name, epoch, i), normalize=False)
 
     # Update learning rate
     lr_scheduler_generator.step()
@@ -412,10 +398,37 @@ def train(epoch, dataloader, discriminator_A, discriminator_B, generator_A2B, ge
     print('%d epoch time: ', datetime.timedelta(seconds=sec), '\n')
 
 
+def sample_images(epoch, iter, real_A, real_B, generator_A2B, generator_B2A):
+    generator_A2B.eval()
+    generator_B2A.eval()
+
+    fake_B = generator_A2B(real_A)
+    fake_A = generator_B2A(real_B)
+
+    cycle_A = generator_B2A(fake_B)
+    cycle_B = generator_A2B(fake_A)
+
+    real_A = torchvision.utils.make_grid(real_A, nrow=4, normalize=True)
+    fake_B = torchvision.utils.make_grid(fake_B, nrow=4, normalize=True)
+    cycle_A = torchvision.utils.make_grid(cycle_A, nrow=4, normalize=True)
+
+    real_B = torchvision.utils.make_grid(real_B, nrow=4, normalize=True)
+    fake_A = torchvision.utils.make_grid(fake_A, nrow=4, normalize=True)
+    cycle_B = torchvision.utils.make_grid(cycle_B, nrow=4, normalize=True)
+
+    print("A",real_A.size())
+    image_grid1 = torch.cat((real_A, fake_B, cycle_A, real_A), 1)
+    image_grid2 = torch.cat((real_B, fake_A, cycle_B, real_B), 1)
+    print(image_grid1.size())
+
+    torchvision.utils.save_image(image_grid1, "output/A/%03d_%04d.png" % (epoch, iter + 1), normalize=False)
+    torchvision.utils.save_image(image_grid2, "output/B/%03d_%04d.png" % (epoch, iter + 1), normalize=False)
+    #04d: 4자리 숫자를 표현하는데 4자리가 안되면 0으로 채워라
+
+
 def pirnt_log(epoch, total_epoch, iter, total_iter, D_loss ,G_loss, G_adv_loss, G_cycle_loss, G_id_loss):
     print("\r[Epoch %d/%d] [Iter %d/%d] [D loss: %f] [G loss: %f -> adv: %f, cycle: %f, identity: %f]"
           % (epoch, total_epoch, iter, total_iter, D_loss, G_loss, G_adv_loss, G_cycle_loss, G_id_loss))
-
 
 
 def adjust_learning_rate(optimizer, args):
@@ -424,23 +437,23 @@ def adjust_learning_rate(optimizer, args):
     )
 
     return lr_scheduler
-# LambdaLR(optimizer, lr_lambda, last_epoch=-1, verbose=False)
-# => Lambda 표현식으로 작성한 함수를 통해 lr 조절, 초기lr에 lambda함수에서 나온 value을 곱해서 lr계산
-# lr_epoch = lr_initial * Lambda(epoch)
 
-# MultiplicativeLR: LambdaLR은 초기 lr에만 곱해줘서 조절해주고 이 모듈은 전lr_epoch-1에 lambda를
-#                   곱해주어 더욱 빠르게 떨어짐
+    # LambdaLR(optimizer, lr_lambda, last_epoch=-1, verbose=False)
+    # => Lambda 표현식으로 작성한 함수를 통해 lr 조절, 초기lr에 lambda함수에서 나온 value을 곱해서 lr계산
+    # lr_epoch = lr_initial * Lambda(epoch)
 
-# stepLR: gamma와 step_size 인자를 바탕으로 step_size마다 gamma를 곱해줌
-#         (if epoch % step_size = 0) Gamma * lr_epoch -1
+    # MultiplicativeLR: LambdaLR은 초기 lr에만 곱해줘서 조절해주고 이 모듈은 전lr_epoch-1에 lambda를
+    #                   곱해주어 더욱 빠르게 떨어짐
 
-# MultistepLR: step_size가 아니라 milestones(epoch)를 따로 지정하는 것만 빼고 stepLR와 동일
+    # stepLR: gamma와 step_size 인자를 바탕으로 step_size마다 gamma를 곱해줌
+    #         (if epoch % step_size = 0) Gamma * lr_epoch -1
+
+    # MultistepLR: step_size가 아니라 milestones(epoch)를 따로 지정하는 것만 빼고 stepLR와 동일
+
 
 
 if __name__ == '__main__':
     main()
-
-
 
 
 
