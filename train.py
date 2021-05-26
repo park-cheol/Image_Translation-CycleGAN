@@ -104,9 +104,10 @@ def main():
     args.distributed = args.world_size > 1 or args.multiprocessing_distributed
 
     ngpus_per_node = torch.cuda.device_count() # node: server(기계)라고 생각
-
+    print("ngpus 개수 확인", ngpus_per_node)
     if args.multiprocessing_distributed:
         args.world_size = ngpus_per_node * args.world_size
+        print("wolrd_size확인: ", args.world_size)
         # world_size: 총 processes 크기 (usually 1gpu = 1process)
         # world_size => 서버(기계)1개당 gpu 수 * 기계 수
         # args.world_size help='총 노드 수'
@@ -127,6 +128,7 @@ def main_worker(gpu, ngpus_per_node, args):
 
     args.gpu = gpu
 
+    print("distributed 확인: ", args.distributed)
     # initial Generator and Discriminator
     # c7s1-64, d128, d256, R256(x6,x9), u128, u64, c7s1-3
     generator_A2B = GeneratorResNet(input_shape, args.n_residual_blocks)
@@ -145,6 +147,7 @@ def main_worker(gpu, ngpus_per_node, args):
         if args.multiprocessing_distributed:
             # 멀티 프로세싱을 하기 위해서 rank는 모든 프로세스 중의 global rank를 필요함
             args.rank = args.rank * ngpus_per_node + gpu
+            print("rank 확인: ", args.rank)
             # 순서대로 rank를 지정해줌 e.g)node 2 with 4gpu
             # node=0 -> rank[0, 1, 2, 3] node=1 -> rank[4, 5, 6, 7]
         dist.init_process_group(backend=args.dist_backend, init_method=args.dist_url,
@@ -178,10 +181,10 @@ def main_worker(gpu, ngpus_per_node, args):
 
         else:
             # device_ids를 설정해주지 않으면 모든 사용가능한 GPU로 batchsize 나누고 할당
-            generator_A2B.cuda(args.gpu)
-            generator_B2A.cuda(args.gpu)
-            discriminator_A.cuda(args.gpu)
-            discriminator_B.cuda(args.gpu)
+            generator_A2B.cuda()
+            generator_B2A.cuda()
+            discriminator_A.cuda()
+            discriminator_B.cuda()
 
             generator_A2B = nn.parallel.DistributedDataParallel(generator_A2B)
             generator_B2A = nn.parallel.DistributedDataParallel(generator_B2A)
@@ -211,10 +214,10 @@ def main_worker(gpu, ngpus_per_node, args):
 
 
     if args.start_epoch != 0: # 저장해놓은 checkpoint가 있으면 실행
-        generator_A2B.load_state_dict(torch.load('saved_models/%s/G_A2B_%d.pth' % (args.dataset_name, args.epoch)))
-        generator_B2A.load_state_dict(torch.load('saved_models/%s/G_B2A_%d.pth' % (args.dataset_name, args.epoch)))
-        discriminator_A.load_state_dict(torch.load('saved_models/%s/D_A_%d.pth' % (args.dataset_name, args.epoch)))
-        discriminator_B.load_state_dict(torch.load('saved_models/%s/D_B_%d.pth' % (args.dataset_name, args.epoch)))
+        generator_A2B.load_state_dict(torch.load('saved_models/%s/G_A2B_%d.pth' % (args.dataset_name, args.start_epoch)))
+        generator_B2A.load_state_dict(torch.load('saved_models/%s/G_B2A_%d.pth' % (args.dataset_name, args.start_epoch)))
+        discriminator_A.load_state_dict(torch.load('saved_models/%s/D_A_%d.pth' % (args.dataset_name, args.start_epoch)))
+        discriminator_B.load_state_dict(torch.load('saved_models/%s/D_B_%d.pth' % (args.dataset_name, args.start_epoch)))
 
     else: # weight 초기화
         generator_A2B.apply(weights_init_normal)
@@ -249,13 +252,14 @@ def main_worker(gpu, ngpus_per_node, args):
 
     # image transform
     transforms_ = [
-        transforms.Resize(int(args.img_height * 1.12), Image.BICUBIC),#TODO Interpolation
+        transforms.Resize((int(args.img_height * 1.12),int(args.img_width * 1.12)), Image.BICUBIC),#TODO Interpolation
         transforms.RandomCrop((args.img_height, args.img_width)),
         transforms.RandomHorizontalFlip(),
         transforms.ToTensor(),
         transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
     ]
 
+    print(args.distributed)
     if args.distributed:
         train_sampler = torch.utils.data.distributed.DistributedSampler(
             ImageDataset('data/%s' % args.dataset_name, transforms_=transforms_, unaligned=True, mode='train')
@@ -265,12 +269,31 @@ def main_worker(gpu, ngpus_per_node, args):
         train_sampler = None
 
     # Dataset loader(train)
+    # Dataset에는 index로 data를 return (__len__, __getitem__)
+    # sampler : __len__, __iter__로 호출시 가져올 data idx 반환
+    # 이것을 dataloader가 인자로 받는 형식
     dataloader = torch.utils.data.DataLoader(
         ImageDataset('data/%s' % args.dataset_name, transforms_=transforms_, unaligned=True, mode='train'),
         batch_size=args.batch_size,
-        shuffle=True,
+        shuffle=(train_sampler is None), # 어차피 sampler로 섞기 때문에 shuffled할 필요가없는듯
         num_workers=args.workers,
+        pin_memory=True,
+        sampler=train_sampler,
     )
+    # num_worker = 4 * num_GPU  실험적으로 좋다 GPU memory 상관 X
+    # pin_memory 언제 쓰는게 좋은가 https://discuss.pytorch.org/t/when-to-set-pin-memory-to-true/19723
+    # GPU와 통신하기 위해 CPU의 메모리공간이 강제로 할당되어서 데이터 통신 속도 향상
+    # 이 때 pinned memory와 pageable memory가 있는데 pinned memory가 제일 좋더라
+    # https://cvml.tistory.com/24 (단 시스템 메모리가 넉넉해야함)
+    # pinned memory에 고정시켜 전송하는 방법
+
+    # sampler: index를 컨트롤 하는 방법
+    # https://subinium.github.io/pytorch-dataloader/
+    # 데이터의 index를 원하는 방식대로 조정 => Shuffle=False여야합니다.
+    # 다양한 option들이 존재
+    # https://hulk89.github.io/pytorch/2019/09/30/pytorch_dataset/
+
+
 
     for epoch in range(args.start_epoch, args.epochs):
         if args.distributed:
@@ -290,8 +313,15 @@ def train(epoch, dataloader, discriminator_A, discriminator_B, generator_A2B, ge
     start_time_epoch = time.time()
 
     for i, batch in enumerate(dataloader): # dataloader return {"A": item_A, "B": item_B}
-        real_A = Variable(batch['A'].type(Tensor)) # [batch:1, channel:3, 256, 256]
-        real_B = Variable(batch['B'].type(Tensor))
+        real_A = Variable(batch['A']).cuda(args.gpu, non_blocking=True) # [batch:1, channel:3, 256, 256]
+        real_B = Variable(batch['B']).cuda(args.gpu, non_blocking=True)
+        # pin_memory=False, non_blocking=True: 안좋을수 있다. https://discuss.pytorch.org/t/should-we-set-non-blocking-to-true/38234/13
+        # Host에서 GPU로 복사할 때 고정된(pinned) 메모리를 사용하면더 빠름
+        # pin_memory를 통해 고정된 영역의 데이터 복사본을 얻고 일단 고정시키면 non_blokcing=True
+        # 넣어줌으로써 비동기적으로 GPU 복사본을 사용 가능
+        # Dataloader 생성자에 pn_memory=True를 넣어주어서 고정된 메모리에서 배치 생산
+        # https://stackoverflow.com/questions/55563376/pytorch-how-does-pin-memory-work-in-dataloader
+
 
         # x.output_shape = (1, height // 16, width // 16): patch size
         # [1, 1, 16, 16]
@@ -370,15 +400,12 @@ def train(epoch, dataloader, discriminator_A, discriminator_B, generator_A2B, ge
 
         # Discriminator total loss
         discriminator_loss = (loss_discriminator_B + loss_discriminator_A) / 2
+        # save sample
+        if i % len(dataloader)-1 == 0:
+            sample_images(epoch, real_A, real_B, generator_A2B, generator_B2A)
 
-
-        # log
-        if (i) % 1 == 0:
+        if i % len(dataloader)-1 ==0:
             pirnt_log(epoch, args.epochs, i, len(dataloader), discriminator_loss, generator_loss, loss_GAN, loss_cycle, loss_id)
-
-            # save sample
-        if i % args.sample_interval == 0:
-            sample_images(epoch, i, real_A, real_B, generator_A2B, generator_B2A)
 
 
     # Update learning rate
@@ -395,10 +422,10 @@ def train(epoch, dataloader, discriminator_A, discriminator_B, generator_A2B, ge
 
     # elapsed time
     sec = time.time() - start_time_epoch
-    print('%d epoch time: ', datetime.timedelta(seconds=sec), '\n')
+    print('%d epoch time: '.format(epoch), datetime.timedelta(seconds=sec), '\n')
 
 
-def sample_images(epoch, iter, real_A, real_B, generator_A2B, generator_B2A):
+def sample_images(epoch, real_A, real_B, generator_A2B, generator_B2A):
     generator_A2B.eval()
     generator_B2A.eval()
 
@@ -421,8 +448,8 @@ def sample_images(epoch, iter, real_A, real_B, generator_A2B, generator_B2A):
     image_grid2 = torch.cat((real_B, fake_A, cycle_B, real_B), 1)
     print(image_grid1.size())
 
-    torchvision.utils.save_image(image_grid1, "output/A/%03d_%04d.png" % (epoch, iter + 1), normalize=False)
-    torchvision.utils.save_image(image_grid2, "output/B/%03d_%04d.png" % (epoch, iter + 1), normalize=False)
+    torchvision.utils.save_image(image_grid1, "output/A/%03d.png" % (epoch), normalize=False)
+    torchvision.utils.save_image(image_grid2, "output/B/%03d.png" % (epoch), normalize=False)
     #04d: 4자리 숫자를 표현하는데 4자리가 안되면 0으로 채워라
 
 
@@ -454,7 +481,6 @@ def adjust_learning_rate(optimizer, args):
 
 if __name__ == '__main__':
     main()
-
 
 
 
