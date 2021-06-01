@@ -138,6 +138,10 @@ def main_worker(gpu, ngpus_per_node, args):
     discriminator_A = Discriminator(input_shape)
     discriminator_B = Discriminator(input_shape)
 
+    # Enocder
+    style_encode = StyleEncoder()
+
+
     if args.gpu is not None:
         print("Use GPU: {} for training".format(args.gpu))
 
@@ -167,6 +171,7 @@ def main_worker(gpu, ngpus_per_node, args):
             generator_B2A.cuda(args.gpu)
             discriminator_A.cuda(args.gpu)
             discriminator_B.cuda(args.gpu)
+            style_encode.cuda(args.gpu)
 
             # per process와 DistributedDataparallel=> single GPU 사용 할 때
             # batchsize를 가지고 있는 총 gpu을 기점으로 나눠 줄 필요가 있다.
@@ -178,7 +183,7 @@ def main_worker(gpu, ngpus_per_node, args):
             generator_B2A = nn.parallel.DistributedDataParallel(generator_B2A, device_ids=[args.gpu])
             discriminator_A = nn.parallel.DistributedDataParallel(discriminator_A, device_ids=[args.gpu])
             discriminator_B = nn.parallel.DistributedDataParallel(discriminator_B, device_ids=[args.gpu])
-
+            style_encode = nn.parallel.DistributedDataParallel(style_encode, device_ids=[args.gpu])
         else:
             # device_ids를 설정해주지 않으면 모든 사용가능한 GPU로 batchsize 나누고 할당
             generator_A2B.cuda()
@@ -198,6 +203,7 @@ def main_worker(gpu, ngpus_per_node, args):
         generator_B2A = generator_B2A.cuda(args.gpu)
         discriminator_A = discriminator_A.cuda(args.gpu)
         discriminator_B = discriminator_B.cuda(args.gpu)
+        style_encode = style_encode.cuda(args.gpu)
 
     else:
         # DataParallel은 사용가능한 gpu에다가 batchsize을 나누고 할당
@@ -218,17 +224,18 @@ def main_worker(gpu, ngpus_per_node, args):
         generator_B2A.load_state_dict(torch.load('saved_models/%s/G_B2A_%d.pth' % (args.dataset_name, args.start_epoch)))
         discriminator_A.load_state_dict(torch.load('saved_models/%s/D_A_%d.pth' % (args.dataset_name, args.start_epoch)))
         discriminator_B.load_state_dict(torch.load('saved_models/%s/D_B_%d.pth' % (args.dataset_name, args.start_epoch)))
-
+        style_encode.load_state_dict(torch.load('saved_models/%s/D_B_%d.pth' % (args.dataset_name, args.start_epoch)))
     else: # weight 초기화
         generator_A2B.apply(weights_init_normal)
         generator_B2A.apply(weights_init_normal)
         discriminator_A.apply(weights_init_normal)
         discriminator_B.apply(weights_init_normal)
+        style_encode.apply(weights_init_normal)
 
     # optimizers
     # itertools.chain("ABC", "DEF") = A B C D E F
     generator_optimizer = torch.optim.Adam(
-        itertools.chain(generator_A2B.parameters(), generator_B2A.parameters()),
+        itertools.chain(generator_A2B.parameters(), generator_B2A.parameters(), style_encode.parameters()),
         lr=args.lr,
         betas=(args.b1, args.b2)
     )
@@ -303,13 +310,13 @@ def main_worker(gpu, ngpus_per_node, args):
         train(epoch, dataloader, discriminator_A, discriminator_B, generator_A2B, generator_B2A,
               generator_optimizer, discriminator_A_optimizer, discriminator_B_optimizer, criterion_GAN,
               criterion_cycle, criterion_idt, lr_scheduler_generator, lr_scheduler_discriminaotr_A,
-              lr_scheduler_discriminaotr_B, fake_A_buffer, fake_B_buffer, output_shape, args)
+              lr_scheduler_discriminaotr_B, fake_A_buffer, fake_B_buffer, output_shape, style_encode,args)
 
 
 def train(epoch, dataloader, discriminator_A, discriminator_B, generator_A2B, generator_B2A,
           generator_optimizer, discriminator_A_optimizer, discriminator_B_optimizer, criterion_GAN,
           criterion_cycle, criterion_idt, lr_scheduler_generator, lr_scheduler_discriminaotr_A,
-          lr_scheduler_discriminaotr_B, fake_A_buffer, fake_B_buffer, output_shape, args):
+          lr_scheduler_discriminaotr_B, fake_A_buffer, fake_B_buffer, output_shape, style_encode,args):
     start_time_epoch = time.time()
 
     for i, batch in enumerate(dataloader): # dataloader return {"A": item_A, "B": item_B}
@@ -321,12 +328,15 @@ def train(epoch, dataloader, discriminator_A, discriminator_B, generator_A2B, ge
         # 넣어줌으로써 비동기적으로 GPU 복사본을 사용 가능
         # Dataloader 생성자에 pn_memory=True를 넣어주어서 고정된 메모리에서 배치 생산
         # https://stackoverflow.com/questions/55563376/pytorch-how-does-pin-memory-work-in-dataloader
-
+        style_A = style_encode(real_A)
+        style_B = style_encode(real_B)
 
         # x.output_shape = (1, height // 16, width // 16): patch size
         # [1, 1, 16, 16]
         valid = Variable(Tensor(np.ones((real_A.size(0), *output_shape))), requires_grad=False)
         fake = Variable(Tensor(np.zeros((real_A.size(0), *output_shape))), requires_grad=False)
+
+
 
         #####################
         #   Generator loss
@@ -338,20 +348,20 @@ def train(epoch, dataloader, discriminator_A, discriminator_B, generator_A2B, ge
 
         # Identity L1 loss
         # 필수는 아니지만 두 도메인의 특징이 비슷할 때 넣어주면 더 좋은 성능을 보임
-        loss_id_A = criterion_idt(generator_B2A(real_A), real_A) # || F(x)-x ||
-        loss_id_B = criterion_idt(generator_A2B(real_B), real_B) # || G(y)-y ||
+        loss_id_A = criterion_idt(generator_B2A(real_A, style_A), real_A) # || F(x)-x ||
+        loss_id_B = criterion_idt(generator_A2B(real_B, style_B), real_B) # || G(y)-y ||
         loss_id = (loss_id_A + loss_id_B) / 2
 
         # GAN MSELoss
-        fake_B = generator_A2B(real_A)
-        fake_A = generator_B2A(real_B)
+        fake_B = generator_A2B(real_A, style_B)
+        fake_A = generator_B2A(real_B, style_A)
         loss_GAN_A2B = criterion_GAN(discriminator_B(fake_B), valid) # |D(G(x))-1|^2
         loss_GAN_B2A = criterion_GAN(discriminator_A(fake_A), valid) # |D(F(y))-1|^2
         loss_GAN = (loss_GAN_A2B + loss_GAN_B2A) / 2
 
         # Cycle L1 loss
-        cycle_A = generator_B2A(fake_B)
-        cycle_B = generator_A2B(fake_A)
+        cycle_A = generator_B2A(fake_B, style_A)
+        cycle_B = generator_A2B(fake_A, style_B)
         loss_cycle_A = criterion_cycle(cycle_A, real_A) # || F(G(x))-x ||
         loss_cycle_B = criterion_cycle(cycle_B, real_B) # || G(F(y))-y ||
         loss_cycle = (loss_cycle_A + loss_cycle_B) / 2
@@ -401,10 +411,10 @@ def train(epoch, dataloader, discriminator_A, discriminator_B, generator_A2B, ge
         # Discriminator total loss
         discriminator_loss = (loss_discriminator_B + loss_discriminator_A) / 2
         # save sample
-        if i % 5000 == 0:
-            sample_images(epoch, i,real_A, real_B, generator_A2B, generator_B2A)
+        if i % 1000 == 0:
+            sample_images(epoch, i, real_A, real_B, generator_A2B, generator_B2A, style_A, style_B)
 
-        if i % 1000 ==0:
+        if i % 100 ==0:
             pirnt_log(epoch, args.epochs, i, len(dataloader), discriminator_loss, generator_loss, loss_GAN, loss_cycle, loss_id)
 
 
@@ -419,21 +429,22 @@ def train(epoch, dataloader, discriminator_A, discriminator_B, generator_A2B, ge
         torch.save(generator_B2A.state_dict(), "saved_models/%s/G_B2A_%d.pth" % (args.dataset_name, epoch+1))
         torch.save(discriminator_A.state_dict(), "saved_models/%s/D_A_%d.pth" % (args.dataset_name, epoch+1))
         torch.save(discriminator_B.state_dict(), "saved_models/%s/D_B_%d.pth" % (args.dataset_name, epoch+1))
+        torch.save(style_encode.state_dict(), "saved_models/%s/style_encode_%d.pth" % (args.dataset_name, epoch+1))
 
     # elapsed time
     sec = time.time() - start_time_epoch
     print('%d epoch time: '.format(epoch), datetime.timedelta(seconds=sec), '\n')
 
 
-def sample_images(epoch, iter, real_A, real_B, generator_A2B, generator_B2A):
+def sample_images(epoch, iter, real_A, real_B, generator_A2B, generator_B2A, style_A, style_B):
     generator_A2B.eval()
     generator_B2A.eval()
 
-    fake_B = generator_A2B(real_A)
-    fake_A = generator_B2A(real_B)
+    fake_B = generator_A2B(real_A, style_B)
+    fake_A = generator_B2A(real_B, style_A)
 
-    cycle_A = generator_B2A(fake_B)
-    cycle_B = generator_A2B(fake_A)
+    cycle_A = generator_B2A(fake_B, style_A)
+    cycle_B = generator_A2B(fake_A, style_B)
 
     real_A = torchvision.utils.make_grid(real_A, nrow=4, normalize=True)
     fake_B = torchvision.utils.make_grid(fake_B, nrow=4, normalize=True)
@@ -443,10 +454,8 @@ def sample_images(epoch, iter, real_A, real_B, generator_A2B, generator_B2A):
     fake_A = torchvision.utils.make_grid(fake_A, nrow=4, normalize=True)
     cycle_B = torchvision.utils.make_grid(cycle_B, nrow=4, normalize=True)
 
-    print("A",real_A.size())
     image_grid1 = torch.cat((real_A, fake_B, cycle_A, real_A), 1)
     image_grid2 = torch.cat((real_B, fake_A, cycle_B, real_B), 1)
-    print(image_grid1.size())
 
     torchvision.utils.save_image(image_grid1, "output/A/%03d_%03d_iter.png" % (epoch, iter), normalize=False)
     torchvision.utils.save_image(image_grid2, "output/B/%03d_%03d_iter.png" % (epoch, iter), normalize=False)

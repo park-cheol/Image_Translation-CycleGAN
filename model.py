@@ -1,11 +1,13 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+from utils import *
 ####################################
 #       Generator
 ####################################
 class ResidualBlock(nn.Module):
-    def __init__(self, in_channels):
+    def __init__(self, in_channels, norm="in"):
         super(ResidualBlock, self).__init__()
 
         # 동일한 Sequential이 들어가기에 conv2d_layer를 하나만 선언하고 forward 사용
@@ -27,6 +29,21 @@ class ResidualBlock(nn.Module):
         output = self.relu(output)
         output = self.conv2d_layer2(output)
         return input + output
+# todo 이부분은 보류
+# class ResidualBlock_adain(nn.Module):
+#     def __init__(self, content_feat, style_feat):
+#         super(ResidualBlock_adain, self).__init__()
+#
+#         self.conv2d_layer1 = nn.Sequential(nn.ReflectionPad2d(1),
+#                                            nn.Conv2d(256, 256, 3),
+#                                            adain(),
+#                                            )
+#
+#         self.conv2d_layer2 = nn.Sequential(nn.ReflectionPad2d(1),
+#                                            nn.Conv2d(256, 256, 3),
+#                                            nn.InstanceNorm2d(256),
+#                                            )
+
 
 class DownSample_Generator(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size, stride, padding):
@@ -46,8 +63,9 @@ class Upsampling_Generator(nn.Module):
 
         self.convLayer = nn.Sequential(nn.Upsample(scale_factor=2),
                                        nn.Conv2d(in_channels, out_channels, kernel_size, stride, padding),
-                                       nn.InstanceNorm2d(out_channels)
+                                       LayerNorm(out_channels, eps=1e-5, affine=True)
                                        )
+        # LayerNorm 인자: num_features, eps=1e-5, affine=True
 
     def forward(self, input):
         output = self.convLayer(input)
@@ -116,11 +134,13 @@ class GeneratorResNet(nn.Module): # 이미지 사진 [channel, width ,height]
                                        nn.Conv2d(64, channels, 7),
                                        )
 
-    def forward(self, input): # input: [1, 3, 256, 256]
+    def forward(self, input, style_encode): # input: [1, 3, 256, 256]
         first_convLayer = self.first_convlayer(input)
         first_convLayer_relu = self.relu(first_convLayer)
 
-        #DownSample Layer
+        ##########
+        # Encoder
+        ##########
         downsample_1 = self.downsample1(first_convLayer_relu)
         downsample_1_relu = self.relu(downsample_1)
         downsample_2 = self.downsample2(downsample_1_relu)
@@ -146,10 +166,12 @@ class GeneratorResNet(nn.Module): # 이미지 사진 [channel, width ,height]
         residualLayer8 = self.residualLayer8(residualLayer7)
         last_residualLayer = self.residualLayer9(residualLayer8)
 
-
-
+        #########
+        # Decoder
+        #########
+        adain_layer = adain(last_residualLayer, style_encode)
         # Upsample Layer
-        upsample1 = self.upsample1(last_residualLayer)
+        upsample1 = self.upsample1(adain_layer)
         upsample1_relu = self.relu(upsample1)
         upsample2 = self.upsample2(upsample1_relu)
         upsample2_relu = self.relu(upsample2)
@@ -215,39 +237,15 @@ class Discriminator(nn.Module):
 # AdaIN
 ################################
 
-class AdaptiveInstanceNorm2d(nn.Module):
+def adain(content_feat, style_feat):
+    assert (content_feat.size()[:2] == style_feat.size()[:2])
+    size = content_feat.size()
+    style_mean, style_std = calc_mean_std(style_feat)
+    content_mean, content_std = calc_mean_std(content_feat)
 
-    def __init__(self, num_features, eps=1e-5, momentum=0.1):
-        super(AdaptiveInstanceNorm2d, self).__init__()
-        self.num_features = num_features
-        self.eps = eps
-        self.momentum = momentum
-        # weight and bias are dynamically assigned
-        self.weight = None
-        self.bias = None
-        # just dummy buffers, not used
-        self.register_buffer("running_mean", torch.zeros(num_features))
-        self.register_buffer("running_var", torch.ones(num_features))
-
-    def forward(self, x):
-        assert (
-            self.weight is not None and self.bias is not None
-        ), "Please assign weight and bias before calling AdaIN!"
-        b, c, h, w = x.size()
-        running_mean = self.running_mean.repeat(b)
-        running_var = self.running_var.repeat(b)
-
-        # Apply instance norm
-        x_reshaped = x.contiguous().view(1, b * c, h, w)
-
-        out = F.batch_norm(
-            x_reshaped, running_mean, running_var, self.weight, self.bias, True, self.momentum, self.eps
-        )
-
-        return out.view(b, c, h, w)
-
-    def __repr__(self):
-        return self.__class__.__name__ + "(" + str(self.num_features) + ")"
+    normalized_feat = (content_feat - content_mean.expand(
+        size)) / content_std.expand(size)
+    return normalized_feat * style_std.expand(size) + style_mean.expand(size)
 
 class LayerNorm(nn.Module):
     def __init__(self, num_features, eps=1e-5, affine=True):
@@ -271,14 +269,33 @@ class LayerNorm(nn.Module):
             x = x * self.gamma.view(*shape) + self.beta.view(*shape)
         return x
 
+#####################################
+# Style Encoder(스타일의 정보를 담고있는 곳)
+#####################################
 
+class StyleEncoder(nn.Module):
+    def __init__(self, in_channels=3, dim=64, n_downsample=2, style_dim=256):
+        super(StyleEncoder, self).__init__()
 
+        # Initial conv block
+        layers = [nn.ReflectionPad2d(3), nn.Conv2d(in_channels, dim, 7), nn.ReLU(inplace=True)]
 
+        # Downsampling
+        for _ in range(2):
+            layers += [nn.Conv2d(dim, dim * 2, 4, stride=2, padding=1), nn.ReLU(inplace=True)]
+            dim *= 2
 
+        # Downsampling with constant depth
+        for _ in range(n_downsample - 2):
+            layers += [nn.Conv2d(dim, dim, 4, stride=2, padding=1), nn.ReLU(inplace=True)]
 
+        # Average pool and output layer
+        layers += [nn.Conv2d(dim, style_dim, 1, 1, 0)]
 
+        self.model = nn.Sequential(*layers)
 
-
+    def forward(self, x): # [B, C, H ,W]
+        return self.model(x) # [Batch, style_dim, 1 , 1]
 
 
 

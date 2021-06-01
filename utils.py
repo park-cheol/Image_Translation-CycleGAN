@@ -83,12 +83,15 @@ class LambdaLR:
 
 # 참고 offset: 시작부터 목적지까지 변위 차 e.g) 'c'문자는 A시작점에서 2의 offset 가짐
 
+def calc_mean_std(features, eps=1e-5): # features : features map이다
+    size = features.size()
+    assert (len(size) == 4)
+    N, C = size[:2] # batch, Channel
 
-
-
-
-
-
+    features_var = features.view(N, C, -1).var(dim=2) + eps
+    features_std = features_var.sqrt().view(N, C, 1, 1)
+    features_mean = features.view(N, C, -1).mean(dim=2).view(N, C, 1, 1)
+    return features_mean, features_std
 
 
 
