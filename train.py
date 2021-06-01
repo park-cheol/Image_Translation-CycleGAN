@@ -401,10 +401,10 @@ def train(epoch, dataloader, discriminator_A, discriminator_B, generator_A2B, ge
         # Discriminator total loss
         discriminator_loss = (loss_discriminator_B + loss_discriminator_A) / 2
         # save sample
-        if i % len(dataloader)-1 == 0:
-            sample_images(epoch, real_A, real_B, generator_A2B, generator_B2A)
+        if i % 5000 == 0:
+            sample_images(epoch, i,real_A, real_B, generator_A2B, generator_B2A)
 
-        if i % len(dataloader)-1 ==0:
+        if i % 1000 ==0:
             pirnt_log(epoch, args.epochs, i, len(dataloader), discriminator_loss, generator_loss, loss_GAN, loss_cycle, loss_id)
 
 
@@ -425,7 +425,7 @@ def train(epoch, dataloader, discriminator_A, discriminator_B, generator_A2B, ge
     print('%d epoch time: '.format(epoch), datetime.timedelta(seconds=sec), '\n')
 
 
-def sample_images(epoch, real_A, real_B, generator_A2B, generator_B2A):
+def sample_images(epoch, iter, real_A, real_B, generator_A2B, generator_B2A):
     generator_A2B.eval()
     generator_B2A.eval()
 
@@ -448,8 +448,8 @@ def sample_images(epoch, real_A, real_B, generator_A2B, generator_B2A):
     image_grid2 = torch.cat((real_B, fake_A, cycle_B, real_B), 1)
     print(image_grid1.size())
 
-    torchvision.utils.save_image(image_grid1, "output/A/%03d.png" % (epoch), normalize=False)
-    torchvision.utils.save_image(image_grid2, "output/B/%03d.png" % (epoch), normalize=False)
+    torchvision.utils.save_image(image_grid1, "output/A/%03d_%03d_iter.png" % (epoch, iter), normalize=False)
+    torchvision.utils.save_image(image_grid2, "output/B/%03d_%03d_iter.png" % (epoch, iter), normalize=False)
     #04d: 4자리 숫자를 표현하는데 4자리가 안되면 0으로 채워라
 
 
