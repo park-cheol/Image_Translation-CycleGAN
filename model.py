@@ -338,7 +338,7 @@ class VGG19(nn.Module):
 
     def forward(self, input):
         norm = self.normalization(input)
-        vgg_output = self.vgg(norm).detach()
+        vgg_output = self.vgg(norm)
         vgg_output = vgg_output.view(self.batch, -1)
         feature_map = self.linear(vgg_output)
 

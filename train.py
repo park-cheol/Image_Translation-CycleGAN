@@ -236,7 +236,7 @@ def main_worker(gpu, ngpus_per_node, args):
     #                                 betas=(args.b1, args.b2))
 
     generator_optimizer = torch.optim.Adam(
-        itertools.chain(generator_A2B.parameters(), generator_B2A.parameters()),
+        itertools.chain(generator_A2B.parameters(), generator_B2A.parameters(), vgg_A.parameters(), vgg_B.parameters()),
         lr=args.lr,
         betas=(args.b1, args.b2)
     )
@@ -317,7 +317,8 @@ def main_worker(gpu, ngpus_per_node, args):
 def train(epoch, dataloader, discriminator_A, discriminator_B, generator_A2B, generator_B2A,
           generator_optimizer, discriminator_A_optimizer, discriminator_B_optimizer, criterion_GAN,
           criterion_cycle, criterion_idt, lr_scheduler_generator, lr_scheduler_discriminaotr_A,
-          lr_scheduler_discriminaotr_B, fake_A_buffer, fake_B_buffer, output_shape, vgg_A, vgg_B,args):
+          lr_scheduler_discriminaotr_B, fake_A_buffer, fake_B_buffer, output_shape,
+          vgg_A, vgg_B, args):
     start_time_epoch = time.time()
 
     for i, batch in enumerate(dataloader): # dataloader return {"A": item_A, "B": item_B}
@@ -332,17 +333,28 @@ def train(epoch, dataloader, discriminator_A, discriminator_B, generator_A2B, ge
 
         # x.output_shape = (1, height // 16, width // 16): patch size
         # [1, 1, 16, 16]
+        generator_A2B.train()
+        generator_B2A.train()
+        vgg_A.train()
+        vgg_B.train()
+
+
         valid = Variable(Tensor(np.ones((real_A.size(0), *output_shape))), requires_grad=False)
         fake = Variable(Tensor(np.zeros((real_A.size(0), *output_shape))), requires_grad=False)
 
         style_A = vgg_A(real_A)
+        style_A_ = vgg_A(generator_B2A(real_A, style_A))
         style_B = vgg_B(real_B)
+        style_B_ = vgg_B(generator_A2B(real_B, style_B))
+
+        style_loss_A = criterion_cycle(style_A, style_A_)
+        style_loss_B = criterion_cycle(style_B, style_B_)
+
+        style_loss = (style_loss_A + style_loss_B) / 2
 
         #####################
         #   Generator loss
         #####################
-        generator_A2B.train()
-        generator_B2A.train()
 
         generator_optimizer.zero_grad()
 
@@ -368,7 +380,7 @@ def train(epoch, dataloader, discriminator_A, discriminator_B, generator_A2B, ge
 
 
         # Generator total loss
-        generator_loss = loss_GAN + args.lambda_cyc * loss_cycle + args.lambda_id * loss_id
+        generator_loss = loss_GAN + args.lambda_cyc * loss_cycle + args.lambda_id * loss_id + style_loss
         generator_loss.backward()
 
         generator_optimizer.step()
@@ -429,6 +441,8 @@ def train(epoch, dataloader, discriminator_A, discriminator_B, generator_A2B, ge
         torch.save(generator_B2A.state_dict(), "saved_models/%s/G_B2A_%d.pth" % (args.dataset_name, epoch+1))
         torch.save(discriminator_A.state_dict(), "saved_models/%s/D_A_%d.pth" % (args.dataset_name, epoch+1))
         torch.save(discriminator_B.state_dict(), "saved_models/%s/D_B_%d.pth" % (args.dataset_name, epoch+1))
+        torch.save(vgg_A.state_dict(), "saved_models/%s/VGG_A_%d.pth" % (args.dataset_name, epoch+1))
+        torch.save(vgg_B.state_dict(), "saved_models/%s/VGG_B_%d.pth" % (args.dataset_name, epoch+1))
 
     # elapsed time
     sec = time.time() - start_time_epoch
