@@ -138,9 +138,9 @@ def main_worker(gpu, ngpus_per_node, args):
     discriminator_A = Discriminator(input_shape)
     discriminator_B = Discriminator(input_shape)
 
-    # Enocder
-    style_encode = StyleEncoder()
-
+    # Encoder
+    vgg_A = VGG19(args)
+    vgg_B = VGG19(args)
 
     if args.gpu is not None:
         print("Use GPU: {} for training".format(args.gpu))
@@ -171,7 +171,6 @@ def main_worker(gpu, ngpus_per_node, args):
             generator_B2A.cuda(args.gpu)
             discriminator_A.cuda(args.gpu)
             discriminator_B.cuda(args.gpu)
-            style_encode.cuda(args.gpu)
 
             # per process와 DistributedDataparallel=> single GPU 사용 할 때
             # batchsize를 가지고 있는 총 gpu을 기점으로 나눠 줄 필요가 있다.
@@ -183,7 +182,6 @@ def main_worker(gpu, ngpus_per_node, args):
             generator_B2A = nn.parallel.DistributedDataParallel(generator_B2A, device_ids=[args.gpu])
             discriminator_A = nn.parallel.DistributedDataParallel(discriminator_A, device_ids=[args.gpu])
             discriminator_B = nn.parallel.DistributedDataParallel(discriminator_B, device_ids=[args.gpu])
-            style_encode = nn.parallel.DistributedDataParallel(style_encode, device_ids=[args.gpu])
         else:
             # device_ids를 설정해주지 않으면 모든 사용가능한 GPU로 batchsize 나누고 할당
             generator_A2B.cuda()
@@ -203,7 +201,8 @@ def main_worker(gpu, ngpus_per_node, args):
         generator_B2A = generator_B2A.cuda(args.gpu)
         discriminator_A = discriminator_A.cuda(args.gpu)
         discriminator_B = discriminator_B.cuda(args.gpu)
-        style_encode = style_encode.cuda(args.gpu)
+        vgg_A = vgg_A.cuda(args.gpu)
+        vgg_B = vgg_B.cuda(args.gpu)
 
     else:
         # DataParallel은 사용가능한 gpu에다가 batchsize을 나누고 할당
@@ -224,18 +223,20 @@ def main_worker(gpu, ngpus_per_node, args):
         generator_B2A.load_state_dict(torch.load('saved_models/%s/G_B2A_%d.pth' % (args.dataset_name, args.start_epoch)))
         discriminator_A.load_state_dict(torch.load('saved_models/%s/D_A_%d.pth' % (args.dataset_name, args.start_epoch)))
         discriminator_B.load_state_dict(torch.load('saved_models/%s/D_B_%d.pth' % (args.dataset_name, args.start_epoch)))
-        style_encode.load_state_dict(torch.load('saved_models/%s/D_B_%d.pth' % (args.dataset_name, args.start_epoch)))
     else: # weight 초기화
         generator_A2B.apply(weights_init_normal)
         generator_B2A.apply(weights_init_normal)
         discriminator_A.apply(weights_init_normal)
         discriminator_B.apply(weights_init_normal)
-        style_encode.apply(weights_init_normal)
 
     # optimizers
     # itertools.chain("ABC", "DEF") = A B C D E F
+    # vgg_optimizer = torch.optim.Adam(itertools.chain(vgg_A.parameters(), vgg_B.parameters()),
+    #                                 lr=args.lr,
+    #                                 betas=(args.b1, args.b2))
+
     generator_optimizer = torch.optim.Adam(
-        itertools.chain(generator_A2B.parameters(), generator_B2A.parameters(), style_encode.parameters()),
+        itertools.chain(generator_A2B.parameters(), generator_B2A.parameters()),
         lr=args.lr,
         betas=(args.b1, args.b2)
     )
@@ -310,13 +311,13 @@ def main_worker(gpu, ngpus_per_node, args):
         train(epoch, dataloader, discriminator_A, discriminator_B, generator_A2B, generator_B2A,
               generator_optimizer, discriminator_A_optimizer, discriminator_B_optimizer, criterion_GAN,
               criterion_cycle, criterion_idt, lr_scheduler_generator, lr_scheduler_discriminaotr_A,
-              lr_scheduler_discriminaotr_B, fake_A_buffer, fake_B_buffer, output_shape, style_encode,args)
+              lr_scheduler_discriminaotr_B, fake_A_buffer, fake_B_buffer, output_shape, vgg_A, vgg_B, args)
 
 
 def train(epoch, dataloader, discriminator_A, discriminator_B, generator_A2B, generator_B2A,
           generator_optimizer, discriminator_A_optimizer, discriminator_B_optimizer, criterion_GAN,
           criterion_cycle, criterion_idt, lr_scheduler_generator, lr_scheduler_discriminaotr_A,
-          lr_scheduler_discriminaotr_B, fake_A_buffer, fake_B_buffer, output_shape, style_encode,args):
+          lr_scheduler_discriminaotr_B, fake_A_buffer, fake_B_buffer, output_shape, vgg_A, vgg_B,args):
     start_time_epoch = time.time()
 
     for i, batch in enumerate(dataloader): # dataloader return {"A": item_A, "B": item_B}
@@ -328,15 +329,14 @@ def train(epoch, dataloader, discriminator_A, discriminator_B, generator_A2B, ge
         # 넣어줌으로써 비동기적으로 GPU 복사본을 사용 가능
         # Dataloader 생성자에 pn_memory=True를 넣어주어서 고정된 메모리에서 배치 생산
         # https://stackoverflow.com/questions/55563376/pytorch-how-does-pin-memory-work-in-dataloader
-        style_A = style_encode(real_A)
-        style_B = style_encode(real_B)
 
         # x.output_shape = (1, height // 16, width // 16): patch size
         # [1, 1, 16, 16]
         valid = Variable(Tensor(np.ones((real_A.size(0), *output_shape))), requires_grad=False)
         fake = Variable(Tensor(np.zeros((real_A.size(0), *output_shape))), requires_grad=False)
 
-
+        style_A = vgg_A(real_A)
+        style_B = vgg_B(real_B)
 
         #####################
         #   Generator loss
@@ -429,7 +429,6 @@ def train(epoch, dataloader, discriminator_A, discriminator_B, generator_A2B, ge
         torch.save(generator_B2A.state_dict(), "saved_models/%s/G_B2A_%d.pth" % (args.dataset_name, epoch+1))
         torch.save(discriminator_A.state_dict(), "saved_models/%s/D_A_%d.pth" % (args.dataset_name, epoch+1))
         torch.save(discriminator_B.state_dict(), "saved_models/%s/D_B_%d.pth" % (args.dataset_name, epoch+1))
-        torch.save(style_encode.state_dict(), "saved_models/%s/style_encode_%d.pth" % (args.dataset_name, epoch+1))
 
     # elapsed time
     sec = time.time() - start_time_epoch
@@ -460,6 +459,7 @@ def sample_images(epoch, iter, real_A, real_B, generator_A2B, generator_B2A, sty
     torchvision.utils.save_image(image_grid1, "output/A/%03d_%03d_iter.png" % (epoch, iter), normalize=False)
     torchvision.utils.save_image(image_grid2, "output/B/%03d_%03d_iter.png" % (epoch, iter), normalize=False)
     #04d: 4자리 숫자를 표현하는데 4자리가 안되면 0으로 채워라
+
 
 
 def pirnt_log(epoch, total_epoch, iter, total_iter, D_loss ,G_loss, G_adv_loss, G_cycle_loss, G_id_loss):

@@ -2,6 +2,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+import torchvision.models as models
+
 from utils import *
 ####################################
 #       Generator
@@ -10,25 +12,29 @@ class ResidualBlock(nn.Module):
     def __init__(self, in_channels, norm="in"):
         super(ResidualBlock, self).__init__()
 
+
         # 동일한 Sequential이 들어가기에 conv2d_layer를 하나만 선언하고 forward 사용
         # 이는 잘못된 방법
         self.conv2d_layer1 = nn.Sequential(nn.ReflectionPad2d(1),
                                            nn.Conv2d(in_channels, in_channels, 3),
-                                           nn.InstanceNorm2d(in_channels),
                                            )
 
         self.conv2d_layer2 = nn.Sequential(nn.ReflectionPad2d(1),
                                           nn.Conv2d(in_channels, in_channels, 3),
-                                          nn.InstanceNorm2d(in_channels),
                                           )
+
+        self.adain1 = AdaptiveInstanceNorm(in_channels, in_channels)
+        self.adain2 = AdaptiveInstanceNorm(in_channels, in_channels)
 
         self.relu = nn.ReLU(inplace=True)
 
-    def forward(self, input):
-        output = self.conv2d_layer1(input) # in_channel = out_channel, kernel_size = 3
-        output = self.relu(output)
-        output = self.conv2d_layer2(output)
-        return input + output
+    def forward(self, input, style_code):
+        output1 = self.conv2d_layer1(input) # in_channel = out_channel, kernel_size = 3
+        adain1 = self.adain1(output1, style_code)
+        output2 = self.relu(adain1)
+        output3 = self.conv2d_layer2(output2)
+        output4 = self.adain2(output3, style_code)
+        return input + output4
 # todo 이부분은 보류
 # class ResidualBlock_adain(nn.Module):
 #     def __init__(self, content_feat, style_feat):
@@ -134,7 +140,7 @@ class GeneratorResNet(nn.Module): # 이미지 사진 [channel, width ,height]
                                        nn.Conv2d(64, channels, 7),
                                        )
 
-    def forward(self, input, style_encode): # input: [1, 3, 256, 256]
+    def forward(self, input, style_code): # input: [1, 3, 256, 256]
         first_convLayer = self.first_convlayer(input)
         first_convLayer_relu = self.relu(first_convLayer)
 
@@ -156,22 +162,21 @@ class GeneratorResNet(nn.Module): # 이미지 사진 [channel, width ,height]
         #    residualLayer5 = self.residualLayer5(residualLayer4)
         #    last_residualLayer = self.residualLayer6(residualLayer5)
 
-        residualLayer1 = self.residualLayer1(downsample_2_relu)
-        residualLayer2 = self.residualLayer2(residualLayer1)
-        residualLayer3 = self.residualLayer3(residualLayer2)
-        residualLayer4 = self.residualLayer4(residualLayer3)
-        residualLayer5 = self.residualLayer5(residualLayer4)
-        residualLayer6 = self.residualLayer6(residualLayer5)
-        residualLayer7 = self.residualLayer7(residualLayer6)
-        residualLayer8 = self.residualLayer8(residualLayer7)
-        last_residualLayer = self.residualLayer9(residualLayer8)
+        residualLayer1 = self.residualLayer1(downsample_2_relu, style_code)
+        residualLayer2 = self.residualLayer2(residualLayer1, style_code)
+        residualLayer3 = self.residualLayer3(residualLayer2, style_code)
+        residualLayer4 = self.residualLayer4(residualLayer3, style_code)
+        residualLayer5 = self.residualLayer5(residualLayer4, style_code)
+        residualLayer6 = self.residualLayer6(residualLayer5, style_code)
+        residualLayer7 = self.residualLayer7(residualLayer6, style_code)
+        residualLayer8 = self.residualLayer8(residualLayer7, style_code)
+        last_residualLayer = self.residualLayer9(residualLayer8, style_code)
 
         #########
         # Decoder
         #########
-        adain_layer = adain(last_residualLayer, style_encode)
         # Upsample Layer
-        upsample1 = self.upsample1(adain_layer)
+        upsample1 = self.upsample1(last_residualLayer)
         upsample1_relu = self.relu(upsample1)
         upsample2 = self.upsample2(upsample1_relu)
         upsample2_relu = self.relu(upsample2)
@@ -237,15 +242,26 @@ class Discriminator(nn.Module):
 # AdaIN
 ################################
 
-def adain(content_feat, style_feat):
-    assert (content_feat.size()[:2] == style_feat.size()[:2])
-    size = content_feat.size()
-    style_mean, style_std = calc_mean_std(style_feat)
-    content_mean, content_std = calc_mean_std(content_feat)
+class AdaptiveInstanceNorm(nn.Module):
 
-    normalized_feat = (content_feat - content_mean.expand(
-        size)) / content_std.expand(size)
-    return normalized_feat * style_std.expand(size) + style_mean.expand(size)
+    def __init__(self, in_channel=256, style_dim=256):
+        super(AdaptiveInstanceNorm, self).__init__()
+
+        self.norm = nn.InstanceNorm2d(in_channel)
+        self.style = Linear(style_dim, in_channel * 2)
+        self.style.linear.bias.data[:in_channel] = 1
+        self.style.linear.bias.data[in_channel:] = 0
+
+    def forward(self, input, style):
+        style = self.style(style).unsqueeze(2).unsqueeze(3)
+        gamma, beta = style.chunk(2, 1)
+
+        out = self.norm(input)
+        out = gamma * out + beta
+
+        return out
+
+
 
 class LayerNorm(nn.Module):
     def __init__(self, num_features, eps=1e-5, affine=True):
@@ -269,37 +285,64 @@ class LayerNorm(nn.Module):
             x = x * self.gamma.view(*shape) + self.beta.view(*shape)
         return x
 
+
 #####################################
 # Style Encoder(스타일의 정보를 담고있는 곳)
 #####################################
 
-class StyleEncoder(nn.Module):
-    def __init__(self, in_channels=3, dim=64, n_downsample=2, style_dim=256):
-        super(StyleEncoder, self).__init__()
+# class StyleEncoder(nn.Module):
+#     def __init__(self, in_channels=3, dim=64, n_downsample=2, style_dim=256):
+#         super(StyleEncoder, self).__init__()
+#
+#         # Initial conv block
+#         layers = [nn.ReflectionPad2d(3), nn.Conv2d(in_channels, dim, 7), nn.ReLU(inplace=True)]
+#
+#         # Downsampling
+#         for _ in range(2):
+#             layers += [nn.Conv2d(dim, dim * 2, 4, stride=2, padding=1), nn.ReLU(inplace=True)]
+#             dim *= 2
+#
+#         # Downsampling with constant depth
+#         for _ in range(n_downsample - 2):
+#             layers += [nn.Conv2d(dim, dim, 4, stride=2, padding=1), nn.ReLU(inplace=True)]
+#
+#         # Average pool and output layer
+#         layers += [nn.Conv2d(dim, style_dim, 1, 1, 0)]
+#
+#         self.model = nn.Sequential(*layers)
+#
+#     def forward(self, x): # [B, C, H ,W]
+#         return self.model(x) # [Batch, style_dim, 1 , 1]
 
-        # Initial conv block
-        layers = [nn.ReflectionPad2d(3), nn.Conv2d(in_channels, dim, 7), nn.ReLU(inplace=True)]
+class Linear(nn.Module):
+    def __init__(self, in_dim, out_dim):
+        super(Linear, self).__init__()
 
-        # Downsampling
-        for _ in range(2):
-            layers += [nn.Conv2d(dim, dim * 2, 4, stride=2, padding=1), nn.ReLU(inplace=True)]
-            dim *= 2
+        self.linear = nn.Linear(in_dim, out_dim)
+        self.linear.weight.data.normal_()
+        self.linear.bias.data.zero_()
 
-        # Downsampling with constant depth
-        for _ in range(n_downsample - 2):
-            layers += [nn.Conv2d(dim, dim, 4, stride=2, padding=1), nn.ReLU(inplace=True)]
-
-        # Average pool and output layer
-        layers += [nn.Conv2d(dim, style_dim, 1, 1, 0)]
-
-        self.model = nn.Sequential(*layers)
-
-    def forward(self, x): # [B, C, H ,W]
-        return self.model(x) # [Batch, style_dim, 1 , 1]
+    def forward(self, input):
+        return self.linear(input)
 
 
+class VGG19(nn.Module):
+    def __init__(self, args):
+        super(VGG19, self).__init__()
+        self.batch = args.batch_size
+        self.vgg = models.vgg19(pretrained=True).features.eval()
+        self.vgg.add_module('37', nn.AdaptiveAvgPool2d((7, 7)))
 
+        self.normalization = Normalization(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225), args=args)
+        self.linear = Linear(512 * 7 * 7, 256)
 
+    def forward(self, input):
+        norm = self.normalization(input)
+        vgg_output = self.vgg(norm).detach()
+        vgg_output = vgg_output.view(self.batch, -1)
+        feature_map = self.linear(vgg_output)
+
+        return feature_map
 
 
 

@@ -6,9 +6,9 @@ import os
 from PIL import Image
 
 import torch
+import torch.utils
 import torch.utils.data
 import torchvision.transforms as transforms
-
 
 class ImageDataset(torch.utils.data.Dataset):
     def __init__(self, root, transforms_=None, unaligned=False, mode="train"):
@@ -59,11 +59,6 @@ def to_rgb(image):
     # .paste(추가할 이미지, 붙일 위치(가로, 세로)): 이미지붙이기
     rgb_image.paste(image)
     return rgb_image
-
-
-
-
-
 
 
 

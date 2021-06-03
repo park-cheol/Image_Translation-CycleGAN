@@ -16,7 +16,9 @@ import numpy as np
 from torch.autograd import Variable
 
 import torch
+import torch.nn as nn
 import torchvision.utils
+import torchvision.models as models
 
 def weights_init_normal(m):
     classname = m.__class__.__name__ # 부모가 아닌 현재 클래스명을 상속(다시)
@@ -93,6 +95,16 @@ def calc_mean_std(features, eps=1e-5): # features : features map이다
     features_mean = features.view(N, C, -1).mean(dim=2).view(N, C, 1, 1)
     return features_mean, features_std
 
+# PreTrained Model
+
+class Normalization(nn.Module):
+    def __init__(self, mean, std, args):
+        super(Normalization,  self).__init__()
+        self.mean = torch.tensor(mean).view(-1, 1, 1).cuda(args.gpu)
+        self.std = torch.tensor(std).view(-1, 1, 1).cuda(args.gpu)
+
+    def forward(self, img):
+        return (img - self.mean) / self.std
 
 
 
