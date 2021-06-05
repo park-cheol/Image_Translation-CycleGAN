@@ -13,8 +13,7 @@ class ResidualBlock(nn.Module):
         super(ResidualBlock, self).__init__()
 
 
-        # 동일한 Sequential이 들어가기에 conv2d_layer를 하나만 선언하고 forward 사용
-        # 이는 잘못된 방법
+        
         self.conv2d_layer1 = nn.Sequential(nn.ReflectionPad2d(1),
                                            nn.Conv2d(in_channels, in_channels, 3),
                                            )
